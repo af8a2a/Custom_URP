@@ -422,7 +422,8 @@ namespace VividRP.Runtime.RenderPass.Core
             var csmSettings = VividVolumeManagerUtility.GetCascadedShadowSettingsVolume();
             m_VSMReceiverQuality = VirtualShadowMapReceiverQuality.BuildParameters(csmSettings);
             m_VSMReceiverParameters = new Vector4(csmSettings != null && csmSettings.virtualShadowMapPCF.value ? 1 : 0,
-                shadowData.depthBias, shadowData.slopeScaleDepthBias, 0);
+                shadowData.depthBias, shadowData.slopeScaleDepthBias,
+                csmSettings != null && csmSettings.virtualShadowMapStochasticFiltering.value ? 1 : 0);
             m_EnableBilateralDenoise = csmSettings != null && csmSettings.screenSpaceShadowDenoise.value;
             m_EnableTiledResolve = IsVividTiledPCSSQuality(m_ShadowQuality)
                 && CanUseTiledResolveKernels();

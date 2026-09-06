@@ -82,7 +82,7 @@ float4   _CSMCascadeWorldTexelSizes;
 float4   _CSMCascadeBorders;
 int      _CSMShadowQuality;
 int      _VSMPrototypeEnabled;
-float4   _VSMReceiverParameters; // PCF radius (0/1), constant bias in texels, slope bias, reserved
+float4   _VSMReceiverParameters; // PCF enabled, constant bias in texels, slope bias, stochastic filter
 int      _VSMPrototypePageSize;
 int      _VSMPrototypeVirtualResolution;
 int      _VSMPrototypePagesPerAxis;
@@ -1969,7 +1969,74 @@ float VSMTentWeight(float offsetFromCenter)
     return max(1.5 - abs(offsetFromCenter), 0.0);
 }
 
-bool TryFilterVSMProjection(float3 coord, float4 bias, int index, out float shadow)
+uint VSMStochasticHash(uint value)
+{
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    return value ^ (value >> 16);
+}
+
+uint GetVSMStochasticSeed(uint2 pixel, uint frameIndex)
+{
+    return VSMStochasticHash(pixel.x ^ VSMStochasticHash(pixel.y + 0x9e3779b9u)
+        ^ VSMStochasticHash(frameIndex + 0x68bc21ebu));
+}
+
+float2 VSMStochasticDiskSample(uint seed, uint sampleIndex)
+{
+    // Three equal-area radial bands by three angular sectors: nine strata.
+    // Hash jitter is deterministic for a pixel/frame, not a blue-noise sequence.
+    uint random = VSMStochasticHash(seed + sampleIndex * 0x9e3779b9u);
+    float2 jitter = float2(random >> 8, VSMStochasticHash(random + 0x68bc21ebu) >> 8)
+        * (1.0 / 16777216.0);
+    float radius = sqrt(((float)(sampleIndex / 3u) + jitter.x) * (1.0 / 3.0));
+    float angle = ((float)(sampleIndex % 3u) + jitter.y) * (kPCSSTwoPi / 3.0);
+    float sine, cosine;
+    sincos(angle, sine, cosine);
+    return radius * float2(cosine, sine);
+}
+
+int2 GetVSMStochasticTexelOffset(float2 centerOffset, float2 sampleOffset)
+{
+    // Keep the unit-radius support when a sum just below 2 rounds up to 2.
+    // This bounds the sample offset, never clamps a virtual map or page edge.
+    return clamp(int2(floor(centerOffset + 0.5 + sampleOffset)), -1, 1);
+}
+
+bool HasVSMStochasticFootprint(float2 shadowUV, int index)
+{
+    int2 minTexel, maxTexel;
+    if (!VividVSMTryOffsetVirtualTexel(shadowUV, int2(-1, -1),
+            (uint)_VSMPrototypeVirtualResolution, minTexel)
+        || !VividVSMTryOffsetVirtualTexel(shadowUV, int2(1, 1),
+            (uint)_VSMPrototypeVirtualResolution, maxTexel))
+    {
+#if defined(VIVID_VSM_RECEIVER_DEBUG)
+        g_VSMDebugMissing |= 8u;
+#endif
+        return false;
+    }
+
+    // Validate the union of all phases before sampling. Radius <= one texel
+    // stays inside the existing feedback halo, spanning at most four pages.
+    int2 minPage = minTexel / _VSMPrototypePageSize;
+    int2 maxPage = maxTexel / _VSMPrototypePageSize;
+    for (int y = minPage.y; y <= maxPage.y; y++)
+    {
+        for (int x = minPage.x; x <= maxPage.x; x++)
+        {
+            int2 physicalTexel;
+            if (!TryResolveVSMPhysicalTexel(int2(x, y) * _VSMPrototypePageSize,
+                    index, physicalTexel))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool TryFilterVSMProjection(float3 coord, float4 bias, int index, uint2 pixel, out float shadow)
 {
     shadow = 1.0;
     float2 centerOffset = frac(coord.xy * (float)_VSMPrototypeVirtualResolution) - 0.5;
@@ -1979,6 +2046,30 @@ bool TryFilterVSMProjection(float3 coord, float4 bias, int index, out float shad
         // Correct that sub-texel displacement on sloped planes in Hard mode too.
         float depth = saturate(coord.z + bias.z - dot(bias.xy, centerOffset));
         return TrySampleVSMVirtualTap(coord.xy, int2(0, 0), depth, index, shadow);
+    }
+
+    if (_VSMReceiverParameters.w >= 0.5)
+    {
+        if (!HasVSMStochasticFootprint(coord.xy, index))
+            return false;
+        uint seed = GetVSMStochasticSeed(pixel, (uint)_CSMFrameIndex);
+        float stochasticSum = 0.0;
+        [unroll]
+        for (uint sampleIndex = 0u; sampleIndex < 9u; sampleIndex++)
+        {
+            float2 sampleOffset = VSMStochasticDiskSample(seed, sampleIndex);
+            int2 texelOffset = GetVSMStochasticTexelOffset(centerOffset, sampleOffset);
+            // Depth follows the actual integer texel center relative to the
+            // ORIGINAL receiver, not the random continuous sample position.
+            float2 tapOffset = float2(texelOffset) - centerOffset;
+            float depth = saturate(coord.z + bias.z + dot(bias.xy, tapOffset));
+            float tapShadow;
+            if (!TrySampleVSMVirtualTap(coord.xy, texelOffset, depth, index, tapShadow))
+                return false;
+            stochasticSum += tapShadow;
+        }
+        shadow = stochasticSum * (1.0 / 9.0);
+        return true;
     }
 
     float sum = 0.0;
@@ -2008,6 +2099,11 @@ bool TryFilterVSMProjection(float3 coord, float4 bias, int index, out float shad
     return true;
 }
 
+bool TryFilterVSMProjection(float3 coord, float4 bias, int index, out float shadow)
+{
+    return TryFilterVSMProjection(coord, bias, index, uint2(0, 0), shadow);
+}
+
 float VSMTransitionWeight(float edge, float border)
 {
     if (border <= 0.0)
@@ -2020,7 +2116,7 @@ float VSMTransitionWeight(float edge, float border)
 // at every fallback level. Reusing a fine UV/depth or shifting a physical texel
 // would sample unrelated data after clipmap scrolling.
 bool TryEvaluateVSMProjection(float3 positionWS, float3 normalWS, int index,
-    bool sampleDepth, out float shadow)
+    bool sampleDepth, uint2 pixel, out float shadow)
 {
     shadow = 1.0;
 #if defined(VIVID_VSM_RECEIVER_DEBUG)
@@ -2042,12 +2138,18 @@ bool TryEvaluateVSMProjection(float3 positionWS, float3 normalWS, int index,
     MarkVSMReceiverPage(coord.xy, index);
     if (!sampleDepth || _VSMPrototypeEnabled == 0)
         return false;
-    return TryFilterVSMProjection(coord, bias, index, shadow);
+    return TryFilterVSMProjection(coord, bias, index, pixel, shadow);
+}
+
+bool TryEvaluateVSMProjection(float3 positionWS, float3 normalWS, int index,
+    bool sampleDepth, out float shadow)
+{
+    return TryEvaluateVSMProjection(positionWS, normalWS, index, sampleDepth, uint2(0, 0), shadow);
 }
 
 #include "VSMReceiverQuality.hlsl"
 
-float ResolveVSMReceiver(float3 positionWS, float3 normalWS)
+float ResolveVSMReceiver(float3 positionWS, float3 normalWS, uint2 pixel)
 {
     bool densityPolicy = _VSMReceiverQuality.x > 0;
     float densityBlend = 0;
@@ -2084,7 +2186,7 @@ float ResolveVSMReceiver(float3 positionWS, float3 normalWS)
             // The last level is prioritized by the allocator to back future misses.
             bool needSample = sampledLevel < 0 || (sampledLevel == index && blend > 0.0 && !hasTransition);
             float sampleShadow;
-            if (!TryEvaluateVSMProjection(positionWS, normalWS, level, needSample, sampleShadow))
+            if (!TryEvaluateVSMProjection(positionWS, normalWS, level, needSample, pixel, sampleShadow))
                 continue;
             if (sampledLevel < 0)
             {
@@ -2114,6 +2216,11 @@ float ResolveVSMReceiver(float3 positionWS, float3 normalWS)
     return 1.0;
 }
 
+float ResolveVSMReceiver(float3 positionWS, float3 normalWS)
+{
+    return ResolveVSMReceiver(positionWS, normalWS, uint2(0, 0));
+}
+
 #if defined(VIVID_VSM_RECEIVER_DEBUG)
 #include "VSMReceiverDebug.hlsl"
 #endif
@@ -2140,7 +2247,7 @@ void CSMShadowResolve(uint3 dispatchThreadID : SV_DispatchThreadID)
     {
         float3 vsmNormal = DecodeVividNormalOct(_GBuffer1.Load(int3(pixelCoord, 0)).xy);
         vsmNormal = ReconstructVSMReceiverNormal(pixelCoord, deviceDepth, positionWS, vsmNormal);
-        float vsmShadow = ResolveVSMReceiver(positionWS, vsmNormal);
+        float vsmShadow = ResolveVSMReceiver(positionWS, vsmNormal, pixelCoord);
         if (_VSMPrototypeEnabled != 0)
         {
             _DirectionalShadowTexture[pixelCoord] = vsmShadow;

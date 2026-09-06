@@ -74,6 +74,7 @@ namespace VividRP.Editor.Tests
                 Shader.SetInt("_VSMPrototypePhysicalPageCapacity", 16);
                 Shader.SetInt("_VSMPrototypeFeedbackFrameIndex", 7);
                 Shader.SetInt("_CSMFrameIndex", 7);
+                Shader.SetInts("_SamplingPixel", 0, 0);
                 for (int i = 0; i < 3; i++)
                 {
                     Matrix4x4 matrix = Matrix4x4.identity;
@@ -127,7 +128,8 @@ namespace VividRP.Editor.Tests
                 Shader.SetInt("_SamplingCount", inputs.Length);
                 Shader.SetBuffer(kernel, "_SamplingInputs", input);
                 bool inspectOnly = kernelName == "InspectBias" || kernelName == "InspectTransition"
-                    || kernelName == "InspectScreenNormal";
+                    || kernelName == "InspectScreenNormal" || kernelName == "InspectVSMStochasticSample"
+                    || kernelName == "InspectVSMStochasticTexelOffset";
                 if (depth != null)
                 {
                     Shader.SetTexture(kernel, "_DepthTexture", depth);
@@ -145,7 +147,8 @@ namespace VividRP.Editor.Tests
                         Shader.SetTexture(kernel, "_VSMPrototypeDynamicPhysicalPage", m_Dynamic);
                     }
                     if (kernelName == "SampleTaps") Shader.SetBuffer(kernel, "_SamplingOffsets", offset);
-                    else if (kernelName != "InspectTransition")
+                    else if (kernelName != "InspectTransition" && kernelName != "InspectVSMStochasticSample"
+                        && kernelName != "InspectVSMStochasticTexelOffset")
                     {
                         Shader.SetBuffer(kernel, "_SamplingNormals", normal);
                         if (kernelName != "FilterFootprints" && kernelName != "InspectScreenNormal")
@@ -687,6 +690,118 @@ namespace VividRP.Editor.Tests
             Assert.That(f.MetadataData[11].z, Is.Zero);
         }
 
+        [Test]
+        public void StochasticSamples_RoundingCannotEscapeTheOneTexelFeedbackHalo()
+        {
+            using var f = new Fixture();
+            var inputs = new[]
+            {
+                new float4(0.49999994f, 0.49999994f, 1, 0),
+                new float4(0.49999994f, 0.49999994f, 0, 1),
+                new float4(-0.5f, -0.5f, -1, 0),
+                new float4(-0.5f, -0.5f, 0, -1),
+                new float4(-0.2f, 0.2f, 0.6f, -0.8f),
+            };
+            Assert.That(f.Run("InspectVSMStochasticTexelOffset", inputs), Is.EqualTo(new[]
+            {
+                new float2(1, 0), new float2(0, 1), new float2(-1, 0), new float2(0, -1), new float2(0, -1),
+            }));
+        }
+
+        [Test]
+        public void StochasticSamples_CoverNineEqualAreaStrataAndVaryDeterministicallyByFrameAndPixel()
+        {
+            using var f = new Fixture();
+            const int frameCount = 128;
+            var inputs = new float4[frameCount * 9];
+            for (int frame = 0; frame < frameCount; frame++) for (int sample = 0; sample < 9; sample++)
+                inputs[frame * 9 + sample] = new float4(17, 29, sample, frame);
+            float2[] samples = f.Run("InspectVSMStochasticSample", inputs);
+            Assert.That(f.Run("InspectVSMStochasticSample", inputs), Is.EqualTo(samples));
+            float2 mean = 0;
+            float meanSquareRadius = 0;
+            bool frameChanged = false;
+            for (int i = 0; i < samples.Length; i++)
+            {
+                int sample = i % 9;
+                float squareRadius = math.lengthsq(samples[i]);
+                float angle = math.atan2(samples[i].y, samples[i].x);
+                if (angle < 0) angle += 2 * math.PI;
+                Assert.That(squareRadius, Is.InRange(sample / 3 / 3f - 1e-6f, (sample / 3 + 1) / 3f + 1e-6f));
+                Assert.That(angle, Is.InRange(sample % 3 * 2 * math.PI / 3 - 1e-6f,
+                    (sample % 3 + 1) * 2 * math.PI / 3 + 1e-6f));
+                mean += samples[i]; meanSquareRadius += squareRadius;
+                if (i >= 9 && math.lengthsq(samples[i] - samples[i - 9]) > 1e-6f) frameChanged = true;
+            }
+            Assert.That(frameChanged, Is.True);
+            Assert.That(math.length(mean / samples.Length), Is.LessThan(0.04f));
+            Assert.That(meanSquareRadius / samples.Length, Is.EqualTo(0.5f).Within(0.02f));
+            inputs[0].x += 1;
+            Assert.That(math.lengthsq(f.Run("InspectVSMStochasticSample", new[] { inputs[0] })[0] - samples[0]),
+                Is.GreaterThan(1e-6f));
+        }
+
+        [Test]
+        public void StochasticFilter_NineComparisonMeanConvergesToAnalyticUnitDiskCoverage()
+        {
+            using var f = new Fixture();
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(1, 0, 0, 1));
+            f.Shader.SetInts("_SamplingPixel", 17, 29);
+            int[] slots = { 9, 2, 14, 6 };
+            for (int page = 0; page < 4; page++) f.Map(page, slots[page], page % 2 == 0 ? 0.8f : 0.2f);
+            f.Upload();
+            // The page boundary is a straight occluder edge 0.25 texels from
+            // the receiver. Its disk coverage has an independent exact integral.
+            const float distance = 0.25f;
+            double expected = (Math.Acos(distance) - distance * Math.Sqrt(1 - distance * distance)) / Math.PI;
+            var inputs = new[] { new float4((4 - distance) / 8, 4.2f / 8, 0.5f, 0) };
+            double sum = 0, individualError = 0, blockSum = 0, blockError = 0;
+            const int frameCount = 512, blockSize = 64;
+            for (int frame = 0; frame < frameCount; frame++)
+            {
+                f.Shader.SetInt("_CSMFrameIndex", frame);
+                float2 value = f.Run("FilterFootprints", inputs)[0];
+                Assert.That(value.x, Is.EqualTo(1));
+                Assert.That(value.y * 9, Is.EqualTo(Mathf.Round(value.y * 9)).Within(1e-5f));
+                sum += value.y; blockSum += value.y;
+                individualError += (value.y - expected) * (value.y - expected);
+                if ((frame + 1) % blockSize == 0)
+                {
+                    double error = blockSum / blockSize - expected;
+                    blockError += error * error; blockSum = 0;
+                }
+            }
+            Assert.That(sum / frameCount, Is.EqualTo(expected).Within(0.025));
+            Assert.That(blockError / (frameCount / blockSize), Is.LessThan(individualError / frameCount * 0.15));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void StochasticFilter_IncompletePotentialFootprintUsesTheSameFallbackAcrossFrames(bool dirty)
+        {
+            using var f = new Fixture();
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(1, 0, 0, 1));
+            for (int page = 0; page < 3; page++) f.Map(page, 8 + page, 0.8f);
+            if (dirty) { f.Map(3, 11, 0.8f); f.MetadataData[3].x |= 4; }
+            for (int page = 4; page < 8; page++) f.Map(page, page - 4);
+            f.Upload();
+            // Only a small disk corner can reach fine page 3. Residency must
+            // be checked even in frames whose nine samples miss that corner.
+            var receiver = new float4(-0.8125f, -0.8125f, 0, 0);
+            for (int frame = 0; frame < 64; frame++)
+            {
+                f.Shader.SetInt("_CSMFrameIndex", frame);
+                Assert.That(f.Run("ResolveReceivers", new[] { receiver })[0].x, Is.EqualTo(1));
+                float4 diagnostic = f.RunDiagnostic(receiver, 0);
+                Assert.That(diagnostic.x, Is.Zero);
+                Assert.That(diagnostic.y, Is.EqualTo(1));
+            }
+            for (int page = 0; page < 4; page++) Assert.That(f.MetadataData[page].x & 1, Is.EqualTo(1));
+            // The experimental option does not enable PCF by itself.
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(0, 0, 0, 1));
+            Assert.That(f.Run("ResolveReceivers", new[] { receiver })[0].x, Is.Zero);
+        }
+
         [TestCase(3.5f, 0.16f)]
         [TestCase(3.25f, 0.09876543f)]
         public void PCF_NormalizesTentWeightsAcrossShuffledPages(float center, float expected)
@@ -744,12 +859,13 @@ namespace VividRP.Editor.Tests
             Assert.That(f.Run("ResolveReceivers", new[] { new float4(2.25f, 0, 0, 0) })[0].x, Is.Zero);
         }
 
-        [TestCase(false)]
-        [TestCase(true)]
-        public void Sampling_ReceiverPlaneCorrectionRemovesCoplanarTapSelfShadow(bool pcf)
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void Sampling_ReceiverPlaneCorrectionRemovesCoplanarTapSelfShadow(bool pcf, bool stochastic)
         {
             using var f = new Fixture();
-            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(pcf ? 1 : 0, 0, 0, 0));
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(pcf ? 1 : 0, 0, 0, stochastic ? 1 : 0));
             int[] slots = { 9, 2, 14, 6 };
             for (int page = 0; page < 4; page++) f.Map(page, slots[page]);
             for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
@@ -1009,18 +1125,21 @@ namespace VividRP.Editor.Tests
             finally { Object.DestroyImmediate(depth); }
         }
 
-        [TestCase(false, 0.0078125f)]
-        [TestCase(true, 0.0078125f)]
-        [TestCase(false, 0.015625f)]
-        [TestCase(true, 0.015625f)]
-        [TestCase(false, 0.03125f)]
-        [TestCase(true, 0.03125f)]
-        public void Sampling_DefaultBiasKeepsCoplanarReceiverLitAndNearbyBlockerShadowed(bool pcf, float texelSize)
+        [TestCase(false, 0.0078125f, false)]
+        [TestCase(true, 0.0078125f, false)]
+        [TestCase(true, 0.0078125f, true)]
+        [TestCase(false, 0.015625f, false)]
+        [TestCase(true, 0.015625f, false)]
+        [TestCase(true, 0.015625f, true)]
+        [TestCase(false, 0.03125f, false)]
+        [TestCase(true, 0.03125f, false)]
+        [TestCase(true, 0.03125f, true)]
+        public void Sampling_DefaultBiasKeepsCoplanarReceiverLitAndNearbyBlockerShadowed(bool pcf, float texelSize, bool stochastic)
         {
             using var f = new Fixture();
             f.Shader.SetInt("_VSMProjectionCount", 1);
             f.Shader.SetVector("_VSMReceiverParameters", new Vector4(pcf ? 1 : 0,
-                VividAdditionalLightData.DefaultShadowDepthBias, VividAdditionalLightData.DefaultShadowSlopeBias, 0));
+                VividAdditionalLightData.DefaultShadowDepthBias, VividAdditionalLightData.DefaultShadowSlopeBias, stochastic ? 1 : 0));
             var projection = f.ProjectionData[0];
             projection.WorldToShadow.m00 = projection.WorldToShadow.m11 = 1 / (8 * texelSize);
             projection.WorldToShadow.m22 = 0.1f;

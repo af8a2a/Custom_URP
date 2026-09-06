@@ -15,6 +15,7 @@ namespace VividRP.Editor
         public string name;
         [Range(512, 16384)] public int resolution = 2048;
         public bool pcf;
+        public bool stochasticFiltering;
         [Range(-4, 12)] public int firstLevel = 1;
         [Min(0.01f)] public float maxDistance = 150;
         [Range(0, 0.5f)] public float transition = 0.2f;
@@ -77,6 +78,7 @@ namespace VividRP.Editor
             settings.enableVirtualShadowMapPrototype.Override(true);
             settings.virtualShadowMapResolution.Override(resolution);
             settings.virtualShadowMapPCF.Override(pcf);
+            settings.virtualShadowMapStochasticFiltering.Override(stochasticFiltering);
             settings.virtualShadowMapFirstLevel.Override(firstLevel);
             settings.maxShadowDistance.Override(maxDistance);
             settings.virtualShadowMapTransition.Override(transition);
@@ -89,6 +91,7 @@ namespace VividRP.Editor
         internal bool Matches(CascadedShadowSettingsVolume settings)
             => settings != null && settings.enableCSM.value && settings.enableVirtualShadowMapPrototype.value
                 && settings.virtualShadowMapResolution.value == resolution && settings.virtualShadowMapPCF.value == pcf
+                && settings.virtualShadowMapStochasticFiltering.value == stochasticFiltering
                 && settings.virtualShadowMapFirstLevel.value == firstLevel && settings.maxShadowDistance.value == maxDistance
                 && settings.virtualShadowMapTransition.value == transition && settings.virtualShadowMapScreenDensity.value == screenDensity
                 && settings.virtualShadowMapTargetTexelPixels.value == targetTexelPixels && settings.virtualShadowMapResolutionLodBias.value == lodBias

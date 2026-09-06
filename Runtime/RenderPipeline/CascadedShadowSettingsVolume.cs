@@ -30,8 +30,10 @@ namespace VividRP.Runtime
         public ClampedFloatParameter virtualShadowMapTargetTexelPixels = new(1, 0.25f, 8);
         [Tooltip("Receiver quality only: -1 halves the target texel footprint (finer); +1 doubles it (coarser). Does not change First Level, virtual resolution or the page budget. Requires Screen Density.")]
         public ClampedFloatParameter virtualShadowMapResolutionLodBias = new(0, -4, 4);
-        [Tooltip("Enable normalized 3x3 tent PCF for VSM. Off keeps the single-point hard-shadow reference; missing filter footprints fall back as a whole to a coarser level.")]
+        [Tooltip("Enable VSM filtering, using normalized 3x3 tent PCF by default. Off keeps the single-point hard-shadow reference; missing filter footprints fall back as a whole to a coarser level.")]
         public BoolParameter virtualShadowMapPCF = new(false);
+        [Tooltip("Experimental nine-comparison stratified disk filter with frame-varying samples. Requires VSM PCF; radius is one virtual texel. Intended for comparison with tent PCF under temporal anti-aliasing.")]
+        public BoolParameter virtualShadowMapStochasticFiltering = new(false);
         [Tooltip("Width of transitions to the next available level. Screen Density uses this fraction of a LOD step and the projection coverage border; legacy selection uses the selection radius. 0 disables blending.")]
         public ClampedFloatParameter virtualShadowMapTransition = new(0.2f, 0f, 0.5f);
         public ClampedIntParameter cascadeCount = new(DefaultCascadeCount, 1, 4);

@@ -8,6 +8,8 @@
 #pragma kernel ResolveScreenReceivers
 #pragma kernel InspectReceiverDiagnostics VIVID_VSM_RECEIVER_DEBUG
 #pragma kernel InspectReceiverFootprint VIVID_VSM_RECEIVER_DEBUG
+#pragma kernel InspectVSMStochasticSample
+#pragma kernel InspectVSMStochasticTexelOffset
 #pragma kernel UploadTestPools
 #pragma use_dxc
 
@@ -19,6 +21,7 @@ StructuredBuffer<int2> _SamplingOffsets;
 StructuredBuffer<float4> _SamplingNormals;
 RWStructuredBuffer<float2> _SamplingResults;
 int _SamplingCount;
+int2 _SamplingPixel;
 
 StructuredBuffer<uint> _TestStaticData;
 StructuredBuffer<uint> _TestDynamicData;
@@ -46,7 +49,7 @@ void InspectReceiverDiagnostics(uint3 id : SV_DispatchThreadID)
     g_VSMDebugWork = 0;
     g_VSMDebugMissing = 0;
     g_VSMDebugQuality = -1;
-    float shadow = ResolveVSMReceiver(_SamplingInputs[id.x].xyz, _SamplingNormals[id.x].xyz);
+    float shadow = ResolveVSMReceiver(_SamplingInputs[id.x].xyz, _SamplingNormals[id.x].xyz, uint2(_SamplingPixel));
     _DiagnosticResults[id.x] = _VSMReceiverDebugMode == 6
         ? (_VSMReceiverQuality.x > 0 ? g_VSMDebugQuality : -1) : _VSMReceiverDebugMode == 4
         ? float4(g_VSMDebugWork, g_VSMDebugLevels.z >= 0 ? 1 : 0)
@@ -79,7 +82,7 @@ void ResolveReceivers(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint)_SamplingCount) return;
     _SamplingResults[id.x] = float2(
-        ResolveVSMReceiver(_SamplingInputs[id.x].xyz, _SamplingNormals[id.x].xyz), 0.0);
+        ResolveVSMReceiver(_SamplingInputs[id.x].xyz, _SamplingNormals[id.x].xyz, uint2(_SamplingPixel)), 0.0);
 }
 
 [numthreads(64, 1, 1)]
@@ -88,8 +91,25 @@ void FilterFootprints(uint3 id : SV_DispatchThreadID)
     if (id.x >= (uint)_SamplingCount) return;
     float4 input = _SamplingInputs[id.x];
     float shadow;
-    bool valid = TryFilterVSMProjection(input.xyz, _SamplingNormals[id.x], (int)input.w, shadow);
+    bool valid = TryFilterVSMProjection(input.xyz, _SamplingNormals[id.x], (int)input.w, uint2(_SamplingPixel), shadow);
     _SamplingResults[id.x] = float2(valid ? 1.0 : 0.0, shadow);
+}
+
+[numthreads(64, 1, 1)]
+void InspectVSMStochasticSample(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_SamplingCount) return;
+    float4 input = _SamplingInputs[id.x];
+    uint seed = GetVSMStochasticSeed(uint2(input.xy), (uint)input.w);
+    _SamplingResults[id.x] = VSMStochasticDiskSample(seed, (uint)input.z);
+}
+
+[numthreads(64, 1, 1)]
+void InspectVSMStochasticTexelOffset(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_SamplingCount) return;
+    float4 input = _SamplingInputs[id.x];
+    _SamplingResults[id.x] = float2(GetVSMStochasticTexelOffset(input.xy, input.zw));
 }
 
 [numthreads(64, 1, 1)]
@@ -131,7 +151,7 @@ void ResolveScreenReceivers(uint3 id : SV_DispatchThreadID)
     float depth = _DepthTexture.Load(int3(pixel, 0));
     float3 position = ReconstructWorldPosition(pixel, depth);
     float3 normal = ReconstructVSMReceiverNormal(pixel, depth, position, _SamplingNormals[id.x].xyz);
-    _SamplingResults[id.x] = float2(ResolveVSMReceiver(position, normal), 0.0);
+    _SamplingResults[id.x] = float2(ResolveVSMReceiver(position, normal, pixel), 0.0);
 }
 
 [numthreads(64, 1, 1)]

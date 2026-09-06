@@ -64,6 +64,7 @@ namespace VividRP.Editor
         private SerializedDataParameter m_VirtualShadowMapTargetTexelPixels;
         private SerializedDataParameter m_VirtualShadowMapResolutionLodBias;
         private SerializedDataParameter m_VirtualShadowMapPCF;
+        private SerializedDataParameter m_VirtualShadowMapStochasticFiltering;
         private SerializedDataParameter m_VirtualShadowMapTransition;
         private SerializedDataParameter m_CascadeCount;
         private SerializedDataParameter m_MaxShadowDistance;
@@ -95,6 +96,7 @@ namespace VividRP.Editor
             m_VirtualShadowMapTargetTexelPixels = Unpack(fetcher.Find(x => x.virtualShadowMapTargetTexelPixels));
             m_VirtualShadowMapResolutionLodBias = Unpack(fetcher.Find(x => x.virtualShadowMapResolutionLodBias));
             m_VirtualShadowMapPCF = Unpack(fetcher.Find(x => x.virtualShadowMapPCF));
+            m_VirtualShadowMapStochasticFiltering = Unpack(fetcher.Find(x => x.virtualShadowMapStochasticFiltering));
             m_VirtualShadowMapTransition = Unpack(fetcher.Find(x => x.virtualShadowMapTransition));
             m_CascadeCount = Unpack(fetcher.Find(x => x.cascadeCount));
             m_MaxShadowDistance = Unpack(fetcher.Find(x => x.maxShadowDistance));
@@ -118,6 +120,7 @@ namespace VividRP.Editor
             PropertyField(m_VirtualShadowMapTargetTexelPixels);
             PropertyField(m_VirtualShadowMapResolutionLodBias);
             PropertyField(m_VirtualShadowMapPCF);
+            PropertyField(m_VirtualShadowMapStochasticFiltering);
             PropertyField(m_VirtualShadowMapTransition);
             PropertyField(m_MaxShadowDistance, s_MaxShadowDistanceLabel);
             PropertyField(m_ScreenSpaceShadowDenoise, s_ScreenSpaceShadowDenoiseLabel);

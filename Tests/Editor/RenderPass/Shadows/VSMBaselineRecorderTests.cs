@@ -292,11 +292,15 @@ namespace VividRP.Editor.Tests
             var settings = ScriptableObject.CreateInstance<CascadedShadowSettingsVolume>();
             try
             {
-                var parameter = new VSMBaselineCase { resolution = 4096, pcf = true, screenDensity = true,
+                var parameter = new VSMBaselineCase { resolution = 4096, pcf = true, stochasticFiltering = true, screenDensity = true,
                     targetTexelPixels = 0.5f, lodBias = -1, firstLevel = 0, maxDistance = 80, transition = 0.3f };
                 settings.cascadeCount.value = 2;
                 parameter.Validate(); parameter.Apply(settings);
                 Assert.That(parameter.Matches(settings), Is.True);
+                Assert.That(settings.virtualShadowMapStochasticFiltering.overrideState, Is.True);
+                settings.virtualShadowMapStochasticFiltering.value = false;
+                Assert.That(parameter.Matches(settings), Is.False);
+                settings.virtualShadowMapStochasticFiltering.value = true;
                 Assert.That(settings.virtualShadowMapResolution.overrideState, Is.True);
                 Assert.That(settings.cascadeCount.value, Is.EqualTo(2));
                 settings.virtualShadowMapResolutionLodBias.value = 1;

@@ -10,6 +10,10 @@ namespace VividRP.Runtime.RenderPass.Core
 {
     internal sealed class TSRUpscalerPass : IDisposable
     {
+#if UNITY_EDITOR
+        // Opt-in diagnostics: issue readbacks on the same command buffer after TSR.
+        internal static event Action<CommandBuffer, Camera, int, Texture, Texture, Texture, Texture, Texture, Texture> EditorTemporalCapture;
+#endif
         private const int CameraStateExpirationFrames = 400;
         private const int KernelThreadGroupSize = 8;
         private const string TsrWaveOpsKeyword = "VIVID_TSR_WAVE_OPS";
@@ -255,6 +259,10 @@ namespace VividRP.Runtime.RenderPass.Core
                        s_ProfilingSampler))
             {
                 passData.State = cameraState;
+#if UNITY_EDITOR
+                passData.Camera = cameraData.camera;
+                passData.FrameIndex = cameraData.frameIndex;
+#endif
                 passData.Shaders = shaders;
                 passData.Source = sourceTexture.innerHandle;
                 passData.Depth = depthTexture.innerHandle;
@@ -420,6 +428,11 @@ namespace VividRP.Runtime.RenderPass.Core
             if (data.EnableSharpening)
                 DispatchSharpen(cmd, data);
 
+#if UNITY_EDITOR
+            EditorTemporalCapture?.Invoke(cmd, data.Camera, data.FrameIndex,
+                data.Source.ResolveTexture(), data.Output.ResolveTexture(), data.ResolveOutput.ResolveTexture(),
+                data.RejectionMask.ResolveTexture(), data.CurrentHistoryMeta.ResolveTexture(), data.DilatedMotion.ResolveTexture());
+#endif
             data.State.MarkHistoryWritten();
         }
 
@@ -840,6 +853,10 @@ namespace VividRP.Runtime.RenderPass.Core
 
         private sealed class PassData
         {
+#if UNITY_EDITOR
+            public Camera Camera;
+            public int FrameIndex;
+#endif
             public CameraState State;
             public ShaderSet Shaders;
             public TextureHandle Source;

@@ -23,7 +23,7 @@ namespace VividRP.Editor
             "_VSMPrototypeStaticPhysicalPage", "_VSMPrototypeDynamicPhysicalPage", "_VSMPrototypePageTable",
             "_VSMPrototypePageMetadata", "_VSMReceiverDebugMode", "_CSMInvViewProjMatrix",
             "_VSMReceiverParameters", "_CSMOutputWidth", "_CSMOutputHeight", "_VSMPrototypeEnabled",
-            "_VSMPrototypeVirtualResolution", "_VSMPrototypePageSize", "_VSMPrototypePagesPerAxis", "_VSMPrototypePhysicalPagesPerRow" };
+            "_VSMPrototypeVirtualResolution", "_VSMPrototypePageSize", "_VSMPrototypePagesPerAxis", "_VSMPrototypePhysicalPagesPerRow", "_CSMFrameIndex" };
         private static readonly int[] s_Ids = BuildIds();
         private static int[] BuildIds()
         {
@@ -383,13 +383,14 @@ namespace VividRP.Editor
             cmd.SetComputeMatrixParam(m_Compute, VirtualShadowMapReceiverQuality.ViewProjectionId, vp);
             cmd.SetComputeMatrixParam(m_Compute, s_Ids[10], vp.inverse);
             cmd.SetComputeVectorParam(m_Compute, VirtualShadowMapReceiverQuality.ParametersId, VirtualShadowMapReceiverQuality.BuildParameters(settings));
-            cmd.SetComputeVectorParam(m_Compute, s_Ids[11], new Vector4(settings.virtualShadowMapPCF.value ? 1 : 0, shadow.depthBias, shadow.slopeScaleDepthBias, 0));
+            cmd.SetComputeVectorParam(m_Compute, s_Ids[11], new Vector4(settings.virtualShadowMapPCF.value ? 1 : 0, shadow.depthBias, shadow.slopeScaleDepthBias, settings.virtualShadowMapStochasticFiltering.value ? 1 : 0));
             cmd.SetComputeIntParam(m_Compute, s_Ids[12], m_Width); cmd.SetComputeIntParam(m_Compute, s_Ids[13], m_Height);
             cmd.SetComputeIntParam(m_Compute, s_Ids[14], 1);
             cmd.SetComputeIntParam(m_Compute, s_Ids[15], VirtualShadowMapPrototypeRuntime.VirtualResolution);
             cmd.SetComputeIntParam(m_Compute, s_Ids[16], VirtualShadowMapPrototypeRuntime.PageSize);
             cmd.SetComputeIntParam(m_Compute, s_Ids[17], VirtualShadowMapPrototypeRuntime.PagesPerAxis);
             cmd.SetComputeIntParam(m_Compute, s_Ids[18], VirtualShadowMapPrototypeRuntime.PhysicalPagesPerRow);
+            cmd.SetComputeIntParam(m_Compute, s_Ids[19], camera.frameIndex >= 0 ? camera.frameIndex : Time.frameCount);
         }
 
         private void ShadowReadback(AsyncGPUReadbackRequest request)

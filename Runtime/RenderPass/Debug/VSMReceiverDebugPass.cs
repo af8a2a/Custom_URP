@@ -35,6 +35,7 @@ namespace VividRP.Runtime.RenderPass.Core
         private static readonly int MetadataId = Shader.PropertyToID("_VSMPrototypePageMetadata");
         private static readonly int EnabledId = Shader.PropertyToID("_VSMPrototypeEnabled");
         private static readonly int ParametersId = Shader.PropertyToID("_VSMReceiverParameters");
+        private static readonly int FrameIndexId = Shader.PropertyToID("_CSMFrameIndex");
         private static readonly int ResolutionId = Shader.PropertyToID("_VSMPrototypeVirtualResolution");
         private static readonly int PageSizeId = Shader.PropertyToID("_VSMPrototypePageSize");
         private static readonly int PagesPerAxisId = Shader.PropertyToID("_VSMPrototypePagesPerAxis");
@@ -119,7 +120,7 @@ namespace VividRP.Runtime.RenderPass.Core
             m_InvViewProjection = m_ViewProjection.inverse;
             m_Quality = VirtualShadowMapReceiverQuality.BuildParameters(settings);
             m_Parameters = new Vector4(settings.virtualShadowMapPCF.value ? 1 : 0,
-                shadow.depthBias, shadow.slopeScaleDepthBias, 0);
+                shadow.depthBias, shadow.slopeScaleDepthBias, settings.virtualShadowMapStochasticFiltering.value ? 1 : 0);
             m_Static = PassRecorder.ImportTextureForPass(this, VirtualShadowMapPrototypeRuntime.StaticPhysicalPage, AccessFlags.Read);
             m_Dynamic = PassRecorder.ImportTextureForPass(this, VirtualShadowMapPrototypeRuntime.DynamicPhysicalPage, AccessFlags.Read);
             m_Table = PassRecorder.ImportBufferForPass(this, VirtualShadowMapPrototypeRuntime.PageTable, AccessFlags.Read);
@@ -162,6 +163,7 @@ namespace VividRP.Runtime.RenderPass.Core
             cmd.SetComputeVectorParam(m_Compute, VirtualShadowMapReceiverQuality.ParametersId, m_Quality);
             cmd.SetComputeMatrixParam(m_Compute, InvViewProjectionId, m_InvViewProjection);
             cmd.SetComputeVectorParam(m_Compute, ParametersId, m_Parameters);
+            cmd.SetComputeIntParam(m_Compute, FrameIndexId, m_FrameIndex);
             cmd.SetComputeIntParam(m_Compute, WidthId, m_Output.desc.Width);
             cmd.SetComputeIntParam(m_Compute, HeightId, m_Output.desc.Height);
             cmd.SetComputeIntParam(m_Compute, EnabledId, 1);

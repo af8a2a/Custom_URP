@@ -102,6 +102,7 @@ namespace VividRP.Editor.Tests
             try
             {
                 Assert.That(volume.virtualShadowMapPCF.value, Is.False);
+                Assert.That(volume.virtualShadowMapStochasticFiltering.value, Is.False);
                 Assert.That(volume.virtualShadowMapTransition.value, Is.EqualTo(0.2f));
                 volume.virtualShadowMapTransition.value = 1;
                 Assert.That(volume.virtualShadowMapTransition.value, Is.EqualTo(0.5f));

@@ -5,6 +5,7 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
+using VividRP.Runtime;
 using VividRP.Runtime.RenderPass.Core;
 using Object = UnityEngine.Object;
 
@@ -810,6 +811,93 @@ namespace VividRP.Editor.Tests
             finally { Object.DestroyImmediate(depth); }
         }
 
+        [TestCase(-1, 0)]
+        [TestCase(1, 0)]
+        [TestCase(0, -1)]
+        [TestCase(0, 1)]
+        public void ReceiverNormal_RejectsCloserDepthAcrossAPlaneBoundary(int directionX, int directionY)
+        {
+            using var f = new Fixture();
+            var depth = new Texture2D(9, 9, GraphicsFormat.R32_SFloat, TextureCreationFlags.None);
+            try
+            {
+                var depths = new float[81];
+                for (int y = 0; y < 9; y++) for (int x = 0; x < 9; x++)
+                    depths[y * 9 + x] = 0.5f + 0.2f * ((x + 0.5f) / 9 * 2 - 1)
+                        + 0.1f * ((y + 0.5f) / 9 * 2 - 1);
+                // The other face is closer to the center depth than either
+                // correct derivative, but does not extrapolate onto its plane.
+                depths[(4 + directionY) * 9 + 4 + directionX] = 0.49f;
+                depths[(4 + 2 * directionY) * 9 + 4 + 2 * directionX] = 0.49f;
+                depth.SetPixelData(depths, 0); depth.Apply(false, false);
+                f.Shader.SetMatrix("_CSMInvViewProjMatrix", ScreenInverse()); f.Upload();
+                var inputs = new[] { new float4(4, 4, 0, 0), new float4(4, 4, 1, 0) };
+                var normals = new[] { new float4(0, 0, 1, 0), new float4(0, 0, 1, 0) };
+                float2[] result = f.Run("InspectScreenNormal", inputs, normals: normals, depth: depth);
+                float3 expected = math.normalize(new float3(-0.2f, -0.1f, 1));
+                Assert.That(result[0].x, Is.EqualTo(expected.x).Within(1e-5));
+                Assert.That(result[0].y, Is.EqualTo(expected.y).Within(1e-5));
+                Assert.That(result[1].x, Is.EqualTo(expected.z).Within(1e-5));
+            }
+            finally { Object.DestroyImmediate(depth); }
+        }
+
+        [TestCase(-1, 0)]
+        [TestCase(1, 0)]
+        [TestCase(0, -1)]
+        [TestCase(0, 1)]
+        public void ReceiverNormal_IncompleteEdgeStencilDoesNotForceADifferentFace(int directionX, int directionY)
+        {
+            using var f = new Fixture();
+            var depth = new Texture2D(9, 9, GraphicsFormat.R32_SFloat, TextureCreationFlags.None);
+            try
+            {
+                var depths = new float[81];
+                for (int y = 0; y < 9; y++) for (int x = 0; x < 9; x++)
+                    depths[y * 9 + x] = 0.5f + 0.2f * ((x + 0.5f) / 9 * 2 - 1)
+                        + 0.1f * ((y + 0.5f) / 9 * 2 - 1);
+                int pixelX = 4 + 3 * directionX;
+                int pixelY = 4 + 3 * directionY;
+                // The correct face has only one neighbor before the image edge;
+                // the opposite pair is complete but belongs to another face.
+                depths[(pixelY - directionY) * 9 + pixelX - directionX] = 0.9f;
+                depths[(pixelY - 2 * directionY) * 9 + pixelX - 2 * directionX] = 0.9f;
+                depth.SetPixelData(depths, 0); depth.Apply(false, false);
+                f.Shader.SetMatrix("_CSMInvViewProjMatrix", ScreenInverse()); f.Upload();
+                var inputs = new[] { new float4(pixelX, pixelY, 0, 0), new float4(pixelX, pixelY, 1, 0) };
+                var normals = new[] { new float4(0, 0, 1, 0), new float4(0, 0, 1, 0) };
+                float2[] result = f.Run("InspectScreenNormal", inputs, normals: normals, depth: depth);
+                float3 expected = math.normalize(new float3(-0.2f, -0.1f, 1));
+                Assert.That(result[0].x, Is.EqualTo(expected.x).Within(1e-5));
+                Assert.That(result[0].y, Is.EqualTo(expected.y).Within(1e-5));
+                Assert.That(result[1].x, Is.EqualTo(expected.z).Within(1e-5));
+            }
+            finally { Object.DestroyImmediate(depth); }
+        }
+
+        [TestCase(2)]
+        [TestCase(3)]
+        public void ReceiverNormal_UsesFirstNeighborsWhenSecondNeighborsAreUnavailable(int size)
+        {
+            using var f = new Fixture();
+            var depth = new Texture2D(size, size, GraphicsFormat.R32_SFloat, TextureCreationFlags.None);
+            try
+            {
+                var depths = new float[size * size];
+                for (int y = 0; y < size; y++) for (int x = 0; x < size; x++)
+                    depths[y * size + x] = 0.5f + 0.2f * ((x + 0.5f) / size * 2 - 1)
+                        + 0.1f * ((y + 0.5f) / size * 2 - 1);
+                depth.SetPixelData(depths, 0); depth.Apply(false, false);
+                f.Shader.SetMatrix("_CSMInvViewProjMatrix", ScreenInverse()); f.Upload();
+                float2 result = f.Run("InspectScreenNormal", new[] { new float4(size / 2, size / 2, 0, 0) },
+                    normals: new[] { new float4(0, 0, 1, 0) }, depth: depth)[0];
+                float3 expected = math.normalize(new float3(-0.2f, -0.1f, 1));
+                Assert.That(result.x, Is.EqualTo(expected.x).Within(1e-5));
+                Assert.That(result.y, Is.EqualTo(expected.y).Within(1e-5));
+            }
+            finally { Object.DestroyImmediate(depth); }
+        }
+
         [TestCase(1)]
         [TestCase(3)]
         public void ReceiverNormal_UsesFallbackWhenNoDepthPlaneCanBeReconstructed(int size)
@@ -878,6 +966,114 @@ namespace VividRP.Editor.Tests
             finally { Object.DestroyImmediate(depth); }
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Sampling_PlaneBoundaryNormalPreservesNearbyOccluder(bool pcf)
+        {
+            using var f = new Fixture();
+            var depth = new Texture2D(5, 5, GraphicsFormat.R32_SFloat, TextureCreationFlags.None);
+            try
+            {
+                var position = new Vector3(-0.025f, -0.025f, -0.0875f);
+                Matrix4x4 inverse = ScreenInverse(0.02f);
+                inverse.m03 = position.x; inverse.m13 = position.y; inverse.m23 = position.z - 0.5f;
+                f.Shader.SetMatrix("_CSMInvViewProjMatrix", inverse);
+                f.Shader.SetVector("_VSMReceiverParameters", new Vector4(pcf ? 1 : 0, 0.1f, 0, 0));
+                var projection = f.ProjectionData[0];
+                projection.WorldToShadow.m00 = projection.WorldToShadow.m11 = 0.5f;
+                projection.WorldToShadow.m22 = 0.1f;
+                projection.Parameters = new Vector4(0.25f, 0, 0, 100);
+                f.ProjectionData[0] = projection;
+                var depths = new float[25];
+                for (int y = 0; y < 5; y++) for (int x = 0; x < 5; x++)
+                    depths[y * 5 + x] = x > 2
+                        ? 0.494f + 0.01f * ((y + 0.5f) / 5 * 2 - 1)
+                        : 0.5f + 0.02f * (3 * ((x + 0.5f) / 5 * 2 - 1)
+                            + 0.5f * ((y + 0.5f) / 5 * 2 - 1));
+                depth.SetPixelData(depths, 0); depth.Apply(false, false);
+                int[] slots = { 9, 2, 14, 6 };
+                for (int page = 0; page < 4; page++) f.Map(page, slots[page]);
+                for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+                {
+                    int slot = slots[y / 4 * 2 + x / 4];
+                    int pixel = (slot / 4 * 4 + y % 4) * 16 + slot % 4 * 4 + x % 4;
+                    // A parallel blocker is only 0.1 world units in front.
+                    f.StaticData[pixel] = math.asuint(0.51f + 0.1f * (3 * ((x + 0.5f) / 4 - 1)
+                        + 0.5f * ((y + 0.5f) / 4 - 1)));
+                }
+                f.Upload();
+                var normals = new[] { new float4(0, 0, 1, 0) };
+                Assert.That(f.Run("ResolveScreenReceivers", new[] { new float4(2, 2, 0, 0) },
+                    normals: normals, depth: depth)[0].x, Is.Zero);
+            }
+            finally { Object.DestroyImmediate(depth); }
+        }
+
+        [TestCase(false, 0.0078125f)]
+        [TestCase(true, 0.0078125f)]
+        [TestCase(false, 0.015625f)]
+        [TestCase(true, 0.015625f)]
+        [TestCase(false, 0.03125f)]
+        [TestCase(true, 0.03125f)]
+        public void Sampling_DefaultBiasKeepsCoplanarReceiverLitAndNearbyBlockerShadowed(bool pcf, float texelSize)
+        {
+            using var f = new Fixture();
+            f.Shader.SetInt("_VSMProjectionCount", 1);
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(pcf ? 1 : 0,
+                VividAdditionalLightData.DefaultShadowDepthBias, VividAdditionalLightData.DefaultShadowSlopeBias, 0));
+            var projection = f.ProjectionData[0];
+            projection.WorldToShadow.m00 = projection.WorldToShadow.m11 = 1 / (8 * texelSize);
+            projection.WorldToShadow.m22 = 0.1f;
+            projection.Parameters = new Vector4(texelSize, VividAdditionalLightData.DefaultShadowNormalBias, 0, 100);
+            f.ProjectionData[0] = projection;
+            int[] slots = { 9, 2, 14, 6 };
+            for (int page = 0; page < 4; page++) f.Map(page, slots[page]);
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+            {
+                int slot = slots[y / 4 * 2 + x / 4];
+                int pixel = (slot / 4 * 4 + y % 4) * 16 + slot % 4 * 4 + x % 4;
+                // The receiver lies on z = x, sampled at virtual texel centers.
+                f.StaticData[pixel] = math.asuint(0.5f + 0.1f * (x - 3.5f) * texelSize);
+            }
+            f.Upload();
+            var inputs = new[] { float4.zero };
+            var normals = new[] { new float4(-1, 0, 1, 0) };
+            Assert.That(f.Run("ResolveReceivers", inputs, normals: normals)[0].x, Is.EqualTo(1).Within(1e-5));
+
+            // Default depth and normal biases already advance by two texels.
+            // Adding a full slope bias again advances by 4.5 texels in total,
+            // incorrectly passing this blocker three texels toward the light.
+            for (int i = 0; i < f.StaticData.Length; i++)
+                if (f.StaticData[i] != 0)
+                    f.StaticData[i] = math.asuint(math.asfloat(f.StaticData[i]) + 0.1f * 3 * texelSize);
+            f.Upload();
+            Assert.That(f.Run("ResolveReceivers", inputs, normals: normals)[0].x, Is.Zero);
+        }
+
+        [TestCase(3f, 0f)]
+        [TestCase(4f, 0f)]
+        [TestCase(4.5f, 1.25f)]
+        [TestCase(6f, 4f)]
+        [TestCase(1000f, 4f)]
+        public void Bias_OnlyUncorrectedGrazingSlopeAddsComparisonBias(float slope, float residualBias)
+        {
+            using var f = new Fixture();
+            const float texelSize = 0.015625f, depthScale = 0.1f;
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(1,
+                VividAdditionalLightData.DefaultShadowDepthBias, VividAdditionalLightData.DefaultShadowSlopeBias, 0));
+            f.ProjectionData[0].WorldToShadow.m22 = depthScale;
+            f.ProjectionData[0].Parameters.x = texelSize;
+            f.ProjectionData[0].Parameters.y = VividAdditionalLightData.DefaultShadowNormalBias;
+            f.Upload();
+            var inputs = new[] { float4.zero, new float4(0, 0, 1, 0) };
+            var normals = new[] { new float4(-slope, 0, 1, 0), new float4(-slope, 0, 1, 0) };
+            float2[] result = f.Run("InspectBias", inputs, normals: normals);
+            Assert.That(result[0].x, Is.EqualTo((VividAdditionalLightData.DefaultShadowDepthBias + residualBias)
+                * depthScale * texelSize).Within(1e-6));
+            Assert.That(result[1].x, Is.EqualTo(Mathf.Min(slope, 4) * depthScale * texelSize).Within(1e-6));
+            Assert.That(result[1].y, Is.Zero);
+        }
+
         [TestCase(0.01f, 1f)]
         [TestCase(0.1f, 1f)]
         [TestCase(0.01f, 0.5f)]
@@ -893,7 +1089,7 @@ namespace VividRP.Editor.Tests
             var normals = new[] { new float4(0.6f, 0, 0.8f, 0), new float4(1, 0, 0, 0),
                 new float4(0, 0, 1, 0), new float4(0.6f, 0, 0.8f, 0) };
             float2[] result = f.Run("InspectBias", inputs, normals: normals);
-            Assert.That(result[0].x, Is.EqualTo(4.25f * depthScale * texelSize).Within(1e-6));
+            Assert.That(result[0].x, Is.EqualTo(2 * depthScale * texelSize).Within(1e-6));
             Assert.That(result[0].y, Is.EqualTo(1.2f * texelSize).Within(1e-6));
             Assert.That(result[1].x, Is.EqualTo(6 * depthScale * texelSize).Within(1e-6));
             Assert.That(result[1].y, Is.EqualTo(2 * texelSize).Within(1e-6));

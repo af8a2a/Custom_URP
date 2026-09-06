@@ -877,8 +877,9 @@ float3 ReconstructVSMReceiverNormal(uint2 pixelCoord, float deviceDepth,
     float3 positionWS, float3 fallbackNormal)
 {
     // A normal map describes shading, not the plane stored in the shadow pool.
-    // Use the nearest-depth one-sided derivative on each axis to avoid crossing
-    // silhouettes. Four depth loads, but only two additional world reconstructions.
+    // Select the one-sided derivative whose two neighbors extrapolate back to
+    // this depth. A different face can be closer in depth than the true slope.
+    // Eight depth loads, but only two additional world reconstructions.
     int2 pixel = int2(pixelCoord);
     int2 limit = int2(_CSMOutputWidth, _CSMOutputHeight) - 1;
     int2 left = max(pixel - int2(1, 0), 0);
@@ -894,6 +895,22 @@ float3 ReconstructVSMReceiverNormal(uint2 pixelCoord, float deviceDepth,
     error.w = up.y == pixel.y || IsSkyPixel(depths.w) ? 1e20 : error.w;
     if (min(error.x, error.y) >= 1e20 || min(error.z, error.w) >= 1e20)
         return fallbackNormal;
+    int2 left2 = max(pixel - int2(2, 0), 0);
+    int2 right2 = min(pixel + int2(2, 0), limit);
+    int2 down2 = max(pixel - int2(0, 2), 0);
+    int2 up2 = min(pixel + int2(0, 2), limit);
+    float4 secondDepths = float4(_DepthTexture.Load(int3(left2, 0)), _DepthTexture.Load(int3(right2, 0)),
+        _DepthTexture.Load(int3(down2, 0)), _DepthTexture.Load(int3(up2, 0)));
+    // Device depth is affine across a projected triangle, including perspective.
+    float4 planeError = abs(2.0 * depths - secondDepths - deviceDepth);
+    planeError.x = error.x >= 1e20 || left2.x == left.x || IsSkyPixel(secondDepths.x) ? 1e20 : planeError.x;
+    planeError.y = error.y >= 1e20 || right2.x == right.x || IsSkyPixel(secondDepths.y) ? 1e20 : planeError.y;
+    planeError.z = error.z >= 1e20 || down2.y == down.y || IsSkyPixel(secondDepths.z) ? 1e20 : planeError.z;
+    planeError.w = error.w >= 1e20 || up2.y == up.y || IsSkyPixel(secondDepths.w) ? 1e20 : planeError.w;
+    // Compare plane errors only with complete stencils on both sides. A missing
+    // second neighbor must not force selection across a different face.
+    if (max(planeError.x, planeError.y) < 1e20) error.xy = planeError.xy;
+    if (max(planeError.z, planeError.w) < 1e20) error.zw = planeError.zw;
     float3 dx = error.x <= error.y
         ? positionWS - ReconstructWorldPosition(uint2(left), depths.x)
         : ReconstructWorldPosition(uint2(right), depths.y) - positionWS;
@@ -1927,11 +1944,15 @@ float4 BuildVSMReceiverBias(VividVSMProjection projection, float3 normalWS)
     float2 nXY = float2(dot(normalWS, rowX / max(length(rowX), 1e-8)),
         dot(normalWS, rowY / max(length(rowY), 1e-8)));
     float denominator = nZ < 0.0 ? min(nZ, -1e-3) : max(nZ, 1e-3);
-    // Grazing planes have an unbounded slope; cap correction to four world
-    // texels of light-axis depth per tap axis, and cap the slope bias likewise.
-    float2 gradient = clamp(-nXY / denominator, -4.0, 4.0) * texelDepth;
-    float slope = min(max(abs(gradient.x), abs(gradient.y)) * _VSMReceiverParameters.z,
-        4.0 * texelDepth);
+    // Each tap already follows the receiver plane. Bias only the slope left
+    // uncorrected by the grazing clamp; adding the full slope again detaches
+    // contact shadows by several texels, increasingly at coarser levels.
+    float2 planeSlope = -nXY / denominator;
+    float2 correctedSlope = clamp(planeSlope, -4.0, 4.0);
+    float2 gradient = correctedSlope * texelDepth;
+    float2 residualSlope = abs(planeSlope - correctedSlope);
+    float slope = min(max(residualSlope.x, residualSlope.y) * _VSMReceiverParameters.z,
+        4.0) * texelDepth;
     float constant = max(_VSMReceiverParameters.y * texelDepth,
         _VSMReceiverParameters.y > 0.0 ? 1.0 / 8388608.0 : 0.0);
     float comparisonBias = constant + slope;

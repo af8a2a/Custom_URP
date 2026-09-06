@@ -13,6 +13,7 @@ namespace VividRP.Runtime.RenderPass.Core
 #if UNITY_EDITOR
         // Opt-in diagnostics: issue readbacks on the same command buffer after TSR.
         internal static event Action<CommandBuffer, Camera, int, Texture, Texture, Texture, Texture, Texture, Texture> EditorTemporalCapture;
+        internal static event Action<CommandBuffer, Camera, int, Texture, Texture, Texture, Texture, Texture, Texture> EditorHistoryCapture;
 #endif
         private const int CameraStateExpirationFrames = 400;
         private const int KernelThreadGroupSize = 8;
@@ -432,6 +433,10 @@ namespace VividRP.Runtime.RenderPass.Core
             EditorTemporalCapture?.Invoke(cmd, data.Camera, data.FrameIndex,
                 data.Source.ResolveTexture(), data.Output.ResolveTexture(), data.ResolveOutput.ResolveTexture(),
                 data.RejectionMask.ResolveTexture(), data.CurrentHistoryMeta.ResolveTexture(), data.DilatedMotion.ResolveTexture());
+            EditorHistoryCapture?.Invoke(cmd, data.Camera, data.FrameIndex,
+                data.ReprojectedHistoryColor.ResolveTexture(), data.AcceptedHistoryColor.ResolveTexture(),
+                data.SpatialAntiAliasedColor.ResolveTexture(), data.ReprojectedResurrectionColor.ResolveTexture(),
+                data.ReprojectedHistoryMeta.ResolveTexture(), data.DepthError.ResolveTexture());
 #endif
             data.State.MarkHistoryWritten();
         }
@@ -490,6 +495,7 @@ namespace VividRP.Runtime.RenderPass.Core
             cmd.SetComputeTextureParam(shader, kernel, ReprojectedHistoryMetaId, data.ReprojectedHistoryMeta);
             cmd.SetComputeTextureParam(shader, kernel, AcceptedHistoryColorId, data.AcceptedHistoryColor);
             cmd.SetComputeTextureParam(shader, kernel, RejectionMaskId, data.RejectionMask);
+            cmd.SetComputeTextureParam(shader, kernel, ReprojectedResurrectionColorId, data.ReprojectedResurrectionColor);
             cmd.DispatchCompute(shader, kernel, DivRoundUp(data.OutputSize.x, KernelThreadGroupSize), DivRoundUp(data.OutputSize.y, KernelThreadGroupSize), 1);
         }
 

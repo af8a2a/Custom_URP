@@ -14,6 +14,7 @@ Texture2D<float> _ReprojectionBoundary;
 Texture2D<float> _LumaInstability;
 Texture2D<float4> _ReprojectedHistoryColor;
 Texture2D<float2> _ReprojectedHistoryMeta;
+Texture2D<float4> _ReprojectedResurrectionColor;
 
 RWTexture2D<float4> _AcceptedHistoryColor;
 RWTexture2D<float> _RejectionMask;
@@ -63,19 +64,82 @@ void CS(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 historyYCoCgForDiff = TSR_RGBToYCoCgVALU(historyColor);
     float lumaDiff = abs(currentYCoCg.x - historyYCoCgForDiff.x) / max(max(currentYCoCg.x, historyYCoCgForDiff.x), 0.2);
     float chromaDiff = length(currentYCoCg.yz - historyYCoCgForDiff.yz);
-    float lumaThreshold = lerp(_TSRRejectionParams.z, _TSRRejectionParams.z * 0.55, reprojectionBoundary);
-    lumaThreshold = lerp(lumaThreshold, lumaThreshold * 1.45, lumaInstability);
+    float baseLumaThreshold = lerp(_TSRRejectionParams.z, _TSRRejectionParams.z * 0.55, reprojectionBoundary);
+    float lumaThreshold = lerp(baseLumaThreshold, baseLumaThreshold * 1.45, lumaInstability);
     float chromaThreshold = lerp(_TSRRejectionParams.w, _TSRRejectionParams.w * 0.65, reprojectionBoundary);
     float motionLimit = lerp(_TSRRejectionParams.y, _TSRRejectionParams.y * 0.5, reprojectionBoundary);
     bool depthRejected = hasSignificantMotion && depthDiff > depthTolerance;
-    bool colorRejected = hasSignificantMotion
-        && (lumaDiff > lumaThreshold || chromaDiff > chromaThreshold);
+    // Lighting can change without receiver motion. Compare the clipped history
+    // to retain the existing neighborhood tolerance for detail and sample noise.
+    bool colorRejected = hasSignificantMotion && (lumaDiff > lumaThreshold || chromaDiff > chromaThreshold);
+    bool stationaryShadingChange = false;
+    float pendingShadingChange = 0.0;
+#if UNITY_REVERSED_Z
+    float receiverDepthScale = max(currentDepth, 1e-6);
+#else
+    float receiverDepthScale = max(1.0 - currentDepth, 1e-6);
+#endif
+    // A geometric silhouette changes subpixel coverage even while stationary.
+    // Preserve its accumulation; confirm lighting on continuous receiving surfaces.
+    bool continuousReceiver = depthError <= receiverDepthScale * 0.02;
+    if (!hasSignificantMotion && continuousReceiver && historyMeta.x > 0.5)
+    {
+        // Confirm a stationary shading change across three consecutive frames.
+        // A signed direction distinguishes persistent lighting from alternating
+        // subpixel detail and stochastic samples. State uses the otherwise unused
+        // resurrection alpha; reproject it with point sampling, not color filtering.
+        float3 delta = currentYCoCg - historyYCoCgForDiff;
+        uint direction;
+        // Temporal confirmation handles alternating samples here. Do not also
+        // classify a real lighting change as flicker and relax its entry threshold.
+        if (lumaDiff / baseLumaThreshold >= chromaDiff / chromaThreshold)
+            direction = delta.x >= 0.0 ? 1u : 2u;
+        else if (abs(delta.y) >= abs(delta.z))
+            direction = delta.y >= 0.0 ? 3u : 4u;
+        else
+            direction = delta.z >= 0.0 ? 5u : 6u;
+
+        uint previousState = (uint)max(_ReprojectedResurrectionColor[pixelCoord].a, 0.0);
+        uint previousDirection = previousState / 4u;
+        uint previousCount = previousState % 4u;
+        bool continuing = previousDirection == direction && previousCount > 0u && previousCount < 3u;
+        // Neighborhood clipping can reduce a real change before confirmation.
+        // Continue at a narrower threshold after a strong same-direction change.
+        float confirmationScale = continuing ? 0.5 : 1.0;
+        bool candidateChange = lumaDiff > baseLumaThreshold * confirmationScale
+            || chromaDiff > chromaThreshold * confirmationScale;
+        if (candidateChange)
+        {
+            // Reconstruction can carry silhouette coverage into nearby pixels.
+            // Each depth-error value already covers a 3x3 source neighborhood;
+            // overlapping samples protect the surrounding reconstruction footprint.
+            float reconstructionDepthError = depthError;
+            [unroll]
+            for (int y = -3; y <= 3; y += 2)
+            {
+                [unroll]
+                for (int x = -3; x <= 3; x += 2)
+                    reconstructionDepthError = max(reconstructionDepthError,
+                        _DepthError[clamp(renderCoord + int2(x, y), int2(0, 0), renderSize - 1)]);
+            }
+            candidateChange = reconstructionDepthError <= receiverDepthScale * 0.02;
+        }
+        uint count = continuing ? previousCount + 1u : 1u;
+        stationaryShadingChange = candidateChange && count >= 3u;
+        pendingShadingChange = candidateChange && !stationaryShadingChange ? (float)(direction * 4u + count) : 0.0;
+    }
 
     bool accepted = historyMeta.x > 0.5
         && motionPixels <= motionLimit
         && !depthRejected
         && !colorRejected;
 
-    _AcceptedHistoryColor[pixelCoord] = float4(accepted ? historyColor : currentColor, 1.0);
+    // A valid history rejected for its shading must not be resurrected later.
+    // Invalid primary history may still recover from compatible older history.
+    // Nonnegative alpha carries pending confirmation state. Moving rejection (-1)
+    // discards primary history; stationary lighting (-2) shortens its accumulation.
+    float shadingState = stationaryShadingChange ? -2.0
+        : (historyMeta.x > 0.5 && colorRejected ? -1.0 : pendingShadingChange);
+    _AcceptedHistoryColor[pixelCoord] = float4(accepted ? historyColor : currentColor, shadingState);
     _RejectionMask[pixelCoord] = accepted ? 1.0 : 0.0;
 }

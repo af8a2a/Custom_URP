@@ -45,8 +45,6 @@ void CS(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 resurrectionColor = _ReprojectedResurrectionColor[pixelCoord].rgb;
     float2 resurrectionMeta = _ReprojectedResurrectionMeta[pixelCoord];
     float accepted = _RejectionMask[pixelCoord] > 0.5 ? 1.0 : 0.0;
-    float shadingState = _AcceptedHistoryColor[pixelCoord].a;
-    bool stationaryShadingChange = shadingState < -1.5;
     float reprojectionBoundary = _ReprojectionBoundary[renderCoord];
     float thinGeometryCoverage = _ThinGeometryCoverage[renderCoord];
     float lumaInstability = _LumaInstability[renderCoord];
@@ -78,8 +76,6 @@ void CS(uint3 dispatchThreadId : SV_DispatchThreadID)
     float sampleCount = accepted > 0.5
         ? min(previousSampleCount + recoveryRate, antiFlickerSampleCount)
         : rejectedSampleCount;
-    if (stationaryShadingChange)
-        sampleCount = min(sampleCount, 4.0);
     float historyWeight = accepted > 0.5
         ? saturate(previousSampleCount / max(sampleCount, 1.0))
         : 0.0;
@@ -91,10 +87,6 @@ void CS(uint3 dispatchThreadId : SV_DispatchThreadID)
     historyWeight = min(historyWeight, min(min(velocityWeightClamp, boundaryWeightClamp), thinGeometryWeightClamp));
     historyWeight = max(historyWeight, moireWeightFloor);
     historyWeight *= saturate(1.0 - weightRelaxation);
-    // A confirmed lighting change needs a faster response, while retaining some
-    // temporal filtering if stationary subpixel coverage was mistaken for lighting.
-    if (stationaryShadingChange)
-        historyWeight = min(historyWeight, 0.75);
     float3 result = TSR_BlendColorVALU(currentColor, historyColor, historyWeight);
 
     float resurrectionFrames = resurrectionMeta.x;
@@ -109,9 +101,7 @@ void CS(uint3 dispatchThreadId : SV_DispatchThreadID)
     float resurrectionDepthTolerance = 0.003 + reprojectionBoundary * 0.012 + thinGeometryCoverage * 0.006;
     float resurrectionLumaTolerance = 0.22 + lumaInstability * 0.25;
     float resurrectionChromaTolerance = 0.28 + lumaInstability * 0.2;
-    bool allowResurrection = shadingState >= 0.0;
     bool resurrectionValid = accepted < 0.5
-        && allowResurrection
         && resurrectionFrames > 0.5
         && velocityFactor < 0.9
         && resurrectionDepthDiff <= resurrectionDepthTolerance
@@ -124,20 +114,17 @@ void CS(uint3 dispatchThreadId : SV_DispatchThreadID)
     result = lerp(result, resurrectionColor, resurrectionWeight);
     sampleCount = max(sampleCount, min(resurrectionFrames, 4.0) * resurrectionWeight);
 
-    // Expire stale shading as well as blocking it in this frame, so a later
-    // disocclusion cannot recover the lighting that was just rejected.
-    float nextResurrectionFrames = !allowResurrection ? 0.0 : (accepted > 0.5
+    float nextResurrectionFrames = accepted > 0.5
         ? TSR_RESURRECTION_PERSISTENT_FRAMES
-        : max(resurrectionFrames - 1.0, 0.0));
+        : max(resurrectionFrames - 1.0, 0.0);
     float3 nextResurrectionColor = accepted > 0.5 ? result : resurrectionColor;
     float nextResurrectionDepth = accepted > 0.5 ? currentDepth : resurrectionDepth;
 
     _UpdatedHistoryColor[pixelCoord] = float4(max(result, 0.0), 1.0);
     _UpdatedHistoryMeta[pixelCoord] = float2(sampleCount, currentDepth);
-    // Confirmation state remains valid even when no color can be resurrected.
-    _UpdatedResurrectionColor[pixelCoord] = float4(
-        nextResurrectionFrames > 0.5 ? max(nextResurrectionColor, 0.0) : 0.0,
-        max(shadingState, 0.0));
+    _UpdatedResurrectionColor[pixelCoord] = nextResurrectionFrames > 0.5
+        ? float4(max(nextResurrectionColor, 0.0), 1.0)
+        : 0.0;
     _UpdatedResurrectionMeta[pixelCoord] = nextResurrectionFrames > 0.5
         ? float2(nextResurrectionFrames, nextResurrectionDepth)
         : 0.0;

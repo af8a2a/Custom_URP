@@ -8,30 +8,24 @@ namespace VividRP.Runtime
     public sealed class VividAntialiasingData : ContextItem
     {
         public bool hasAntialiasingPass;
+        public bool hasNeuralRenderingPass;
         public VividAntialiasingMode requestedMode;
         public VividAntialiasingMode effectiveMode;
         public Vector2Int renderSize;
         public Vector2Int outputSize;
         public bool usesTemporalJitter;
         public bool resetHistory;
-#if DLSS_PLUGIN_INTEGRATE
-        internal RenderGraphTexture neuralRenderingDepthTexture;
-        internal RenderGraphTexture neuralRenderingMotionVectorsTexture;
-#endif
 
         public override void Reset()
         {
             hasAntialiasingPass = false;
+            hasNeuralRenderingPass = false;
             requestedMode = VividAntialiasingMode.None;
             effectiveMode = VividAntialiasingMode.None;
             renderSize = Vector2Int.one;
             outputSize = Vector2Int.one;
             usesTemporalJitter = false;
             resetHistory = false;
-#if DLSS_PLUGIN_INTEGRATE
-            neuralRenderingDepthTexture = null;
-            neuralRenderingMotionVectorsTexture = null;
-#endif
         }
     }
 
@@ -73,25 +67,28 @@ namespace VividRP.Runtime
             Camera camera,
             VividAdditionalCameraData additionalData,
             bool hasAntialiasingPass,
-            VividAntialiasingData data)
+            VividAntialiasingData data,
+            bool hasNeuralRenderingPass = false)
         {
             if (data == null)
                 return;
 
             var outputSize = ResolveOutputSize(camera);
             data.hasAntialiasingPass = hasAntialiasingPass;
+            data.hasNeuralRenderingPass = hasNeuralRenderingPass;
             data.requestedMode = additionalData != null ? additionalData.antialiasing : VividAntialiasingMode.None;
-            data.effectiveMode = hasAntialiasingPass
+            var hasRequestedPass = hasAntialiasingPass;
+#if DLSS_PLUGIN_INTEGRATE
+            if (data.requestedMode == VividAntialiasingMode.DLSSNeuralRendering)
+                hasRequestedPass = hasNeuralRenderingPass;
+#endif
+            data.effectiveMode = hasRequestedPass
                 ? ResolveEffectiveMode(additionalData)
                 : VividAntialiasingMode.None;
             data.outputSize = outputSize;
             data.renderSize = ResolveRenderSize(outputSize, additionalData, data.effectiveMode);
             data.usesTemporalJitter = UsesTemporalJitter(data.effectiveMode);
             data.resetHistory = ShouldResetHistory(camera, additionalData, data.effectiveMode, outputSize);
-#if DLSS_PLUGIN_INTEGRATE
-            data.neuralRenderingDepthTexture = null;
-            data.neuralRenderingMotionVectorsTexture = null;
-#endif
         }
 
         internal static void ApplyJitter(

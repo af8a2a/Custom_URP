@@ -58,7 +58,7 @@ namespace VividRP.Editor
             VividAdditionalCameraData.ExportFinalFrameScreenshotButtonText,
             "Save the selected camera's next final VividRP render as a PNG.");
         private const string AntialiasingPassRequiredMessage =
-            "Camera anti-aliasing requires an AntialiasingPass node connected in the active RenderGraph.";
+            "Camera anti-aliasing requires an AntialiasingPass node. DLSS Neural Rendering requires a DLSSNeuralRenderingPass node between UberPostPass and FinalBlitPass.";
         private const string SingleCameraScreenshotMessage =
             "Select a single camera to export a final frame screenshot.";
         private static readonly GUIContent s_TAALabel = EditorGUIUtility.TrTextContent("Temporal Anti-Aliasing");

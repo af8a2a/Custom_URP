@@ -121,20 +121,6 @@ namespace VividRP.Runtime.RenderPass.Core
             m_Jitter = temporalData != null ? temporalData.jitter : Vector2.zero;
             m_PreviousJitter = temporalData != null ? temporalData.previousJitter : Vector2.zero;
 
-#if DLSS_PLUGIN_INTEGRATE
-            var hasNeuralRenderingInputs = m_EffectiveMode == VividAntialiasingMode.DLSSNeuralRendering
-                && HasTemporalInputs();
-            if (antialiasingData != null)
-            {
-                antialiasingData.neuralRenderingDepthTexture = hasNeuralRenderingInputs
-                    ? CameraDepth
-                    : null;
-                antialiasingData.neuralRenderingMotionVectorsTexture = hasNeuralRenderingInputs
-                    ? MotionVectors
-                    : null;
-            }
-#endif
-
             UpdateOutputDescriptor(cameraData, antialiasingData);
             PrepareTaaHistory(cameraData);
             PrepareCmaa2(frameData);

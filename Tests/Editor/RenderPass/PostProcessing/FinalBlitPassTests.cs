@@ -59,9 +59,12 @@ namespace VividRP.Editor.Tests
         [Test]
         public void GetFinalBlitScaleBias_FlipsY_WhenOriginsDiffer()
         {
-            var method = typeof(FinalBlitPass).GetMethod(
-                "GetFinalBlitScaleBias",
-                BindingFlags.Static | BindingFlags.NonPublic);
+            var method = typeof(TextureScaleBiasUtility).GetMethod(
+                "GetScaleBias",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(Vector2), typeof(TextureUVOrigin), typeof(TextureUVOrigin) },
+                null);
 
             Assert.That(method, Is.Not.Null);
             Assert.That(
@@ -104,105 +107,14 @@ namespace VividRP.Editor.Tests
         }
 
         [Test]
-        public void Initialize_RegistersReadOnlySourceAndColorGradingTextures()
+        public void Initialize_RegistersOnlyReadOnlySource()
         {
-            IRenderPass renderPass = new FinalBlitPass();
-
-            var resources = renderPass.Initialize();
-
-#if DLSS_PLUGIN_INTEGRATE
-            Assert.That(resources.Textures, Has.Length.EqualTo(7));
-#else
-            Assert.That(resources.Textures, Has.Length.EqualTo(3));
-#endif
-            Assert.That(resources.Buffers, Is.Empty);
+            var resources = ((IRenderPass)new FinalBlitPass()).Initialize();
+            Assert.That(resources.Textures, Has.Length.EqualTo(1));
             Assert.That(resources.Textures[0].Name, Is.EqualTo("source"));
             Assert.That(resources.Textures[0].Access, Is.EqualTo(AccessFlags.Read));
-            Assert.That(resources.Textures[0].AttachmentIndex, Is.EqualTo(-1));
-            Assert.That(resources.Textures[0].IsDepthAttachment, Is.False);
-            Assert.That(resources.Textures[1].Name, Is.EqualTo("ColorGradingTexture"));
-            Assert.That(resources.Textures[1].Access, Is.EqualTo(AccessFlags.Read));
-            Assert.That(resources.Textures[1].AttachmentIndex, Is.EqualTo(-1));
-            Assert.That(resources.Textures[1].IsDepthAttachment, Is.False);
-            Assert.That(resources.Textures[2].Name, Is.EqualTo("BloomTexture"));
-            Assert.That(resources.Textures[2].Access, Is.EqualTo(AccessFlags.Read));
-            Assert.That(resources.Textures[2].AttachmentIndex, Is.EqualTo(-1));
-            Assert.That(resources.Textures[2].IsDepthAttachment, Is.False);
-#if DLSS_PLUGIN_INTEGRATE
-            Assert.That(resources.Textures[3].Name, Is.EqualTo("DLSSNRDepth"));
-            Assert.That(resources.Textures[3].Access, Is.EqualTo(AccessFlags.Read));
-            Assert.That(resources.Textures[4].Name, Is.EqualTo("DLSSNRMotionVectors"));
-            Assert.That(resources.Textures[4].Access, Is.EqualTo(AccessFlags.Read));
-            Assert.That(resources.Textures[5].Name, Is.EqualTo("FinalBlitOutput"));
-            Assert.That(resources.Textures[5].Access, Is.EqualTo(AccessFlags.ReadWrite));
-            Assert.That(resources.Textures[5].IsTransient, Is.True);
-            Assert.That(resources.Textures[6].Name, Is.EqualTo("DLSSNROutput"));
-            Assert.That(resources.Textures[6].Access, Is.EqualTo(AccessFlags.ReadWrite));
-            Assert.That(resources.Textures[6].IsTransient, Is.True);
-#endif
+            Assert.That(resources.Buffers, Is.Empty);
         }
-
-#if DLSS_PLUGIN_INTEGRATE
-        [Test]
-        public void PrepareDlssNeuralRendering_ConfiguresPostFinalBlitInputAndBackBufferSizedOutput()
-        {
-            var pass = new FinalBlitPass();
-            var antialiasingData = new VividAntialiasingData
-            {
-                effectiveMode = VividAntialiasingMode.DLSSNeuralRendering,
-                renderSize = new Vector2Int(960, 540),
-                outputSize = new Vector2Int(1920, 1080),
-                resetHistory = true,
-                neuralRenderingDepthTexture = RenderGraphTexture.CreateInput(
-                    "CameraDepth",
-                    GraphicsFormat.None,
-                    DepthBits.Depth32),
-                neuralRenderingMotionVectorsTexture = RenderGraphTexture.CreateInput(
-                    "MotionVectors",
-                    GraphicsFormat.R16G16_SFloat),
-            };
-
-            pass.PrepareDlssNeuralRendering(antialiasingData);
-
-            var finalBlitOutput = GetTextureField(pass, "m_FinalBlitOutput");
-            var neuralRenderingOutput = GetTextureField(pass, "m_DlssNeuralRenderingOutput");
-            Assert.That(finalBlitOutput.desc.Width, Is.EqualTo(960));
-            Assert.That(finalBlitOutput.desc.Height, Is.EqualTo(540));
-            Assert.That(finalBlitOutput.desc.EnableRandomWrite, Is.False);
-            Assert.That(neuralRenderingOutput.desc.Width, Is.EqualTo(1920));
-            Assert.That(neuralRenderingOutput.desc.Height, Is.EqualTo(1080));
-            Assert.That(neuralRenderingOutput.desc.EnableRandomWrite, Is.True);
-            Assert.That(GetBoolField(pass, "m_DlssNeuralRenderingActive"), Is.True);
-            Assert.That(GetBoolField(pass, "m_DlssNeuralRenderingResetHistory"), Is.True);
-        }
-
-        [Test]
-        public void PrepareDlssNeuralRendering_StablePathDoesNotAllocateManagedMemory()
-        {
-            var pass = new FinalBlitPass();
-            var antialiasingData = new VividAntialiasingData
-            {
-                effectiveMode = VividAntialiasingMode.DLSSNeuralRendering,
-                renderSize = new Vector2Int(960, 540),
-                outputSize = new Vector2Int(1920, 1080),
-                neuralRenderingDepthTexture = RenderGraphTexture.CreateInput(
-                    "CameraDepth",
-                    GraphicsFormat.None,
-                    DepthBits.Depth32),
-                neuralRenderingMotionVectorsTexture = RenderGraphTexture.CreateInput(
-                    "MotionVectors",
-                    GraphicsFormat.R16G16_SFloat),
-            };
-            pass.PrepareDlssNeuralRendering(antialiasingData);
-
-            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
-            for (var iteration = 0; iteration < 32; iteration++)
-                pass.PrepareDlssNeuralRendering(antialiasingData);
-            var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
-
-            Assert.That(allocatedBytes, Is.Zero);
-        }
-#endif
 
         [Test]
         public void FinalBlitPass_UsesStableResourceLayout_ForSourceOverrides()
@@ -438,21 +350,6 @@ namespace VividRP.Editor.Tests
             return null;
         }
 
-#if DLSS_PLUGIN_INTEGRATE
-        private static RenderGraphTexture GetTextureField(FinalBlitPass pass, string fieldName)
-        {
-            var field = typeof(FinalBlitPass).GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
-            Assert.That(field, Is.Not.Null);
-            return (RenderGraphTexture)field.GetValue(pass);
-        }
-
-        private static bool GetBoolField(FinalBlitPass pass, string fieldName)
-        {
-            var field = typeof(FinalBlitPass).GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
-            Assert.That(field, Is.Not.Null);
-            return (bool)field.GetValue(pass);
-        }
-#endif
 
         private static void AssertSourceOverrideBehavior(
             IDynamicPassResourceLayout pass,

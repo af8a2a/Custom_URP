@@ -1,15 +1,83 @@
-#if DLSS_PLUGIN_INTEGRATE
-
 using System;
 using System.Collections.Generic;
 using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Experimental.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
 
 namespace VividRP.Runtime.RenderPass.Core
 {
-    internal sealed class DLSSNeuralRenderingPass : IDisposable
+    public sealed class DLSSNeuralRenderingPass : UnsafePass
     {
+        [RenderGraphResource(Name = "Color", Access = AccessFlags.Read)]
+        private RenderGraphTexture m_Source;
+
+        [RenderGraphResource(Name = "CameraDepth", Access = AccessFlags.Read)]
+        private RenderGraphTexture m_Depth;
+
+        [RenderGraphResource(Name = "MotionVectors", Access = AccessFlags.Read)]
+        private RenderGraphTexture m_MotionVectors;
+
+        [RenderGraphResource(Name = "DLSSNROutput", Access = AccessFlags.Write)]
+        [PassBypass(nameof(m_Source))]
+        private RenderGraphTexture m_Output =
+            RenderGraphTexture.CreateColorTarget("DLSSNROutput", GraphicsFormat.R16G16B16A16_SFloat);
+
+        private VividCameraData m_CameraData;
+        private bool m_ResetHistory;
+
+        public override void Create()
+        {
+        }
+
+        public override bool IsActive(ContextContainer frameData)
+        {
+#if DLSS_PLUGIN_INTEGRATE
+            return frameData.Get<VividAntialiasingData>()?.effectiveMode == VividAntialiasingMode.DLSSNeuralRendering
+                && m_Source != null && m_Depth != null && m_MotionVectors != null;
+#else
+            return false;
+#endif
+        }
+
+        public override void Prepare(ContextContainer frameData)
+        {
+            m_CameraData = frameData.Get<VividCameraData>();
+            var antialiasingData = frameData.Get<VividAntialiasingData>();
+            m_ResetHistory = antialiasingData != null && antialiasingData.resetHistory;
+            var outputSize = antialiasingData != null ? antialiasingData.outputSize : Vector2Int.one;
+            var descriptor = m_Output.desc;
+            descriptor.Width = Mathf.Max(1, outputSize.x);
+            descriptor.Height = Mathf.Max(1, outputSize.y);
+            descriptor.EnableRandomWrite = true;
+            descriptor.UseDynamicScale = false;
+            descriptor.UseDynamicScaleExplicit = false;
+        }
+
+        public override void Record(UnsafePassContext context)
+        {
+#if DLSS_PLUGIN_INTEGRATE
+            Execute(
+                CommandBufferHelpers.GetNativeCommandBuffer(context.cmd),
+                m_CameraData,
+                m_Source,
+                m_Depth,
+                m_MotionVectors,
+                m_Output,
+                m_ResetHistory);
+#endif
+        }
+
+        public override void Dispose()
+        {
+#if DLSS_PLUGIN_INTEGRATE
+            DisposeCameraStates();
+#endif
+            m_CameraData = null;
+        }
+
+#if DLSS_PLUGIN_INTEGRATE
         private const int CameraStateExpirationFrames = 400;
 
         private static readonly ProfilerMarker s_RecordMarker =
@@ -77,7 +145,7 @@ namespace VividRP.Runtime.RenderPass.Core
             return true;
         }
 
-        public void Dispose()
+        private void DisposeCameraStates()
         {
             foreach (CameraState state in m_CameraStates.Values)
                 state.Dispose();
@@ -180,7 +248,6 @@ namespace VividRP.Runtime.RenderPass.Core
                 m_NeuralRendering = null;
             }
         }
+#endif
     }
 }
-
-#endif

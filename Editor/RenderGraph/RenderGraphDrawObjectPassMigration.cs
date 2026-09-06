@@ -107,9 +107,16 @@ namespace VividRP.Editor.RenderGraph
             // before they can be removed safely on the next import.
             changed |= RenderGraphStandardOpaqueMigration.Migrate(graph, assetPath);
 
+            changed |= RenderGraphPostProcessMigration.Migrate(graph);
+
             if (graph.SchemaVersion < RenderGraphEditorGraph.CurrentSchemaVersion)
             {
                 graph.SchemaVersion = RenderGraphEditorGraph.CurrentSchemaVersion;
+                foreach (var pass in graph.GetNodes().OfType<RenderPassNodeData>())
+                {
+                    if (pass.GetPassType() == typeof(FinalBlitPass))
+                        pass.DefineNode();
+                }
                 changed = true;
             }
 

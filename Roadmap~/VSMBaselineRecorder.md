@@ -48,6 +48,12 @@ recurrence of sub-1 ms GPU values with FourHz and none in three Manual windows.
 That experiment used **1920×1080 Game output**. It is evidence of recorder repaint
 influence, not a new 3840×2160 capture or attribution of individual GPU results.
 
+A subsequent [3840×2160 ABBA capture](Experiments/RepaintIsolation_20260906/findings.md)
+replicated the result: both Manual windows had zero recorder repaints and zero
+sub-1 ms readings across 1,373 valid GPU samples; FourHz restored the periodic low
+tail. All four cases passed coverage and matched recorded scene/camera/settings.
+The report preserves raw data and documents the temporary graph and attribution limits.
+
 1. Fix the Game camera output at **3840×2160** for both measurements, including
    viewport, render scale and any dynamic-resolution setting. Keep the same scene,
    camera pose, animation state, lights, exposure, VT content, VSync/frame cap,

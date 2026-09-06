@@ -14,6 +14,10 @@ namespace VividRP.Runtime
         public Vector2Int outputSize;
         public bool usesTemporalJitter;
         public bool resetHistory;
+#if DLSS_PLUGIN_INTEGRATE
+        internal RenderGraphTexture neuralRenderingDepthTexture;
+        internal RenderGraphTexture neuralRenderingMotionVectorsTexture;
+#endif
 
         public override void Reset()
         {
@@ -24,6 +28,10 @@ namespace VividRP.Runtime
             outputSize = Vector2Int.one;
             usesTemporalJitter = false;
             resetHistory = false;
+#if DLSS_PLUGIN_INTEGRATE
+            neuralRenderingDepthTexture = null;
+            neuralRenderingMotionVectorsTexture = null;
+#endif
         }
     }
 
@@ -80,6 +88,10 @@ namespace VividRP.Runtime
             data.renderSize = ResolveRenderSize(outputSize, additionalData, data.effectiveMode);
             data.usesTemporalJitter = UsesTemporalJitter(data.effectiveMode);
             data.resetHistory = ShouldResetHistory(camera, additionalData, data.effectiveMode, outputSize);
+#if DLSS_PLUGIN_INTEGRATE
+            data.neuralRenderingDepthTexture = null;
+            data.neuralRenderingMotionVectorsTexture = null;
+#endif
         }
 
         internal static void ApplyJitter(

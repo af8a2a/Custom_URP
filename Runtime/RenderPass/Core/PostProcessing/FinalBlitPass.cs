@@ -1,6 +1,7 @@
 using System;
 using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 
@@ -40,6 +41,32 @@ namespace VividRP.Runtime.RenderPass.Core
         [RenderGraphResource(Name = "BloomTexture", Access = AccessFlags.Read)]
         private RenderGraphTexture bloomTexture = new();
 
+#if DLSS_PLUGIN_INTEGRATE
+        [RenderGraphResource(
+            Name = "DLSSNRDepth",
+            Access = AccessFlags.Read,
+            BindingMode = RenderGraphResourceBindingMode.PassOwnedOverrideable)]
+        private RenderGraphTexture m_DlssNeuralRenderingDepth =
+            RenderGraphTexture.CreateInput("DLSSNRDepth", GraphicsFormat.None, DepthBits.Depth32);
+
+        [RenderGraphResource(
+            Name = "DLSSNRMotionVectors",
+            Access = AccessFlags.Read,
+            BindingMode = RenderGraphResourceBindingMode.PassOwnedOverrideable)]
+        private RenderGraphTexture m_DlssNeuralRenderingMotionVectors =
+            RenderGraphTexture.CreateInput("DLSSNRMotionVectors", GraphicsFormat.R16G16_SFloat);
+
+        [RenderGraphResource(Name = "FinalBlitOutput", Access = AccessFlags.ReadWrite)]
+        [TransientResource]
+        private RenderGraphTexture m_FinalBlitOutput =
+            RenderGraphTexture.CreateColorTarget("FinalBlitOutput", GraphicsFormat.R16G16B16A16_SFloat);
+
+        [RenderGraphResource(Name = "DLSSNROutput", Access = AccessFlags.ReadWrite)]
+        [TransientResource]
+        private RenderGraphTexture m_DlssNeuralRenderingOutput =
+            RenderGraphTexture.CreateColorTarget("DLSSNROutput", GraphicsFormat.R16G16B16A16_SFloat);
+#endif
+
         private Material m_Material;
         private ColorGradingSettingsData m_ColorGradingSettings;
         private FilmGrainSettingsData m_FilmGrainSettings;
@@ -58,6 +85,35 @@ namespace VividRP.Runtime.RenderPass.Core
         private bool m_IsPassResourceLayoutDirty;
         private RenderGraphTexture m_OriginalSource;
         private bool m_HasSourceTextureOverride;
+#if DLSS_PLUGIN_INTEGRATE
+        private readonly RenderGraphTexture m_DefaultDlssNeuralRenderingDepth;
+        private readonly RenderGraphTexture m_DefaultDlssNeuralRenderingMotionVectors;
+        private DLSSNeuralRenderingPass m_DlssNeuralRenderingPass;
+        private VividCameraData m_CameraData;
+        private Rect m_DlssNeuralRenderingInputViewport;
+        private bool m_DlssNeuralRenderingActive;
+        private bool m_DlssNeuralRenderingResetHistory;
+#endif
+
+        public FinalBlitPass()
+        {
+#if DLSS_PLUGIN_INTEGRATE
+            m_DefaultDlssNeuralRenderingDepth = m_DlssNeuralRenderingDepth;
+            m_DefaultDlssNeuralRenderingMotionVectors = m_DlssNeuralRenderingMotionVectors;
+            ConfigureDlssNeuralRenderingTexture(
+                m_FinalBlitOutput,
+                "FinalBlitOutput",
+                1,
+                1,
+                enableRandomWrite: false);
+            ConfigureDlssNeuralRenderingTexture(
+                m_DlssNeuralRenderingOutput,
+                "DLSSNROutput",
+                1,
+                1,
+                enableRandomWrite: true);
+#endif
+        }
 
         public bool IsPassResourceLayoutDirty => m_IsPassResourceLayoutDirty;
 
@@ -117,6 +173,9 @@ namespace VividRP.Runtime.RenderPass.Core
             using (s_PrepareCameraMarker.Auto())
             {
                 var cameraData = frameData.Get<VividCameraData>();
+#if DLSS_PLUGIN_INTEGRATE
+                m_CameraData = cameraData;
+#endif
                 camera = cameraData?.camera;
                 m_HDROutputActive = cameraData != null && cameraData.hdrOutputActive;
                 var hasTargetTexture = camera != null && camera.targetTexture != null;
@@ -208,6 +267,10 @@ namespace VividRP.Runtime.RenderPass.Core
                         AccessFlags.Read);
                 }
             }
+
+#if DLSS_PLUGIN_INTEGRATE
+            PrepareDlssNeuralRendering(frameData.Get<VividAntialiasingData>());
+#endif
         }
 
         public override void Create()
@@ -215,6 +278,9 @@ namespace VividRP.Runtime.RenderPass.Core
             var resources = PipelineResourceManager.Get<VividRPCoreResources>();
 
             m_Material = CoreUtils.CreateEngineMaterial(resources.FinalBlitShader);
+#if DLSS_PLUGIN_INTEGRATE
+            m_DlssNeuralRenderingPass = new DLSSNeuralRenderingPass();
+#endif
         }
 
         public override void Record(UnsafePassContext context)
@@ -334,27 +400,84 @@ namespace VividRP.Runtime.RenderPass.Core
             }
 
             var sourceTextureUVOrigin = context.GetTextureUVOrigin(source.innerHandle);
-            var scaleBias = sourceHandle.GetScaleBias(
-                sourceTextureUVOrigin,
-                m_CameraBackBufferTextureUVOrigin);
+#if DLSS_PLUGIN_INTEGRATE
+            var executeDlssNeuralRendering = CanExecuteDlssNeuralRendering();
+            if (executeDlssNeuralRendering)
+            {
+                var finalBlitScaleBias = sourceHandle.GetScaleBias(
+                    sourceTextureUVOrigin,
+                    context.GetTextureUVOrigin(m_FinalBlitOutput.innerHandle));
+                cmd.SetRenderTarget(m_FinalBlitOutput.innerHandle);
+                cmd.SetViewport(m_DlssNeuralRenderingInputViewport);
+                Blitter.BlitTexture(unsafeCmd, sourceHandle, finalBlitScaleBias, m_Material, 0);
 
-            cmd.SetRenderTarget(m_CameraBackBufferTarget);
-            if (m_ShouldSetViewport)
-                cmd.SetViewport(m_Viewport);
+                m_DlssNeuralRenderingPass.Execute(
+                    unsafeCmd,
+                    m_CameraData,
+                    m_FinalBlitOutput,
+                    m_DlssNeuralRenderingDepth,
+                    m_DlssNeuralRenderingMotionVectors,
+                    m_DlssNeuralRenderingOutput,
+                    m_DlssNeuralRenderingResetHistory);
 
-            Blitter.BlitTexture(unsafeCmd, sourceHandle, scaleBias, m_Material, 0);
+                RTHandle neuralRenderingOutputHandle = m_DlssNeuralRenderingOutput.innerHandle;
+                var presentScaleBias = neuralRenderingOutputHandle.GetScaleBias(
+                    context.GetTextureUVOrigin(m_DlssNeuralRenderingOutput.innerHandle),
+                    m_CameraBackBufferTextureUVOrigin);
+                cmd.SetRenderTarget(m_CameraBackBufferTarget);
+                if (m_ShouldSetViewport)
+                    cmd.SetViewport(m_Viewport);
+                Blitter.BlitTexture(
+                    unsafeCmd,
+                    neuralRenderingOutputHandle,
+                    presentScaleBias,
+                    0f,
+                    bilinear: true);
+            }
+            else
+#endif
+            {
+                var scaleBias = sourceHandle.GetScaleBias(
+                    sourceTextureUVOrigin,
+                    m_CameraBackBufferTextureUVOrigin);
+                cmd.SetRenderTarget(m_CameraBackBufferTarget);
+                if (m_ShouldSetViewport)
+                    cmd.SetViewport(m_Viewport);
+                Blitter.BlitTexture(unsafeCmd, sourceHandle, scaleBias, m_Material, 0);
+            }
 
 #if UNITY_EDITOR
             var camera = context.Get<VividCameraData>()?.camera;
             if (VividAdditionalCameraData.TryGetFinalFrameScreenshotCaptureTarget(camera, out var screenshotTarget))
             {
-                var screenshotScaleBias = sourceHandle.GetScaleBias(
-                    sourceTextureUVOrigin,
-                    TextureUVOrigin.BottomLeft);
+#if DLSS_PLUGIN_INTEGRATE
+                if (executeDlssNeuralRendering)
+                {
+                    RTHandle neuralRenderingOutputHandle = m_DlssNeuralRenderingOutput.innerHandle;
+                    var screenshotScaleBias = neuralRenderingOutputHandle.GetScaleBias(
+                        context.GetTextureUVOrigin(m_DlssNeuralRenderingOutput.innerHandle),
+                        TextureUVOrigin.BottomLeft);
 
-                cmd.SetRenderTarget(screenshotTarget);
-                cmd.SetViewport(new Rect(0f, 0f, screenshotTarget.width, screenshotTarget.height));
-                Blitter.BlitTexture(unsafeCmd, sourceHandle, screenshotScaleBias, m_Material, 0);
+                    cmd.SetRenderTarget(screenshotTarget);
+                    cmd.SetViewport(new Rect(0f, 0f, screenshotTarget.width, screenshotTarget.height));
+                    Blitter.BlitTexture(
+                        unsafeCmd,
+                        neuralRenderingOutputHandle,
+                        screenshotScaleBias,
+                        0f,
+                        bilinear: true);
+                }
+                else
+#endif
+                {
+                    var screenshotScaleBias = sourceHandle.GetScaleBias(
+                        sourceTextureUVOrigin,
+                        TextureUVOrigin.BottomLeft);
+
+                    cmd.SetRenderTarget(screenshotTarget);
+                    cmd.SetViewport(new Rect(0f, 0f, screenshotTarget.width, screenshotTarget.height));
+                    Blitter.BlitTexture(unsafeCmd, sourceHandle, screenshotScaleBias, m_Material, 0);
+                }
                 VividAdditionalCameraData.MarkFinalFrameScreenshotCaptureTargetWritten(camera);
 
                 cmd.SetRenderTarget(m_CameraBackBufferTarget);
@@ -371,7 +494,116 @@ namespace VividRP.Runtime.RenderPass.Core
                 CoreUtils.Destroy(m_Material);
                 m_Material = null;
             }
+#if DLSS_PLUGIN_INTEGRATE
+            m_DlssNeuralRenderingPass?.Dispose();
+            m_DlssNeuralRenderingPass = null;
+            m_CameraData = null;
+#endif
         }
+
+#if DLSS_PLUGIN_INTEGRATE
+        internal void PrepareDlssNeuralRendering(VividAntialiasingData antialiasingData)
+        {
+            var depthTexture = antialiasingData?.neuralRenderingDepthTexture;
+            var motionVectorsTexture = antialiasingData?.neuralRenderingMotionVectorsTexture;
+            m_DlssNeuralRenderingActive = antialiasingData?.effectiveMode
+                == VividAntialiasingMode.DLSSNeuralRendering
+                && depthTexture != null
+                && motionVectorsTexture != null;
+            m_DlssNeuralRenderingResetHistory = m_DlssNeuralRenderingActive
+                && antialiasingData.resetHistory;
+
+            SetDlssNeuralRenderingInputs(
+                m_DlssNeuralRenderingActive ? depthTexture : m_DefaultDlssNeuralRenderingDepth,
+                m_DlssNeuralRenderingActive ? motionVectorsTexture : m_DefaultDlssNeuralRenderingMotionVectors);
+
+            var inputSize = m_DlssNeuralRenderingActive
+                ? antialiasingData.renderSize
+                : Vector2Int.one;
+            var outputSize = m_DlssNeuralRenderingActive
+                ? antialiasingData.outputSize
+                : Vector2Int.one;
+            ConfigureDlssNeuralRenderingTexture(
+                m_FinalBlitOutput,
+                "FinalBlitOutput",
+                inputSize.x,
+                inputSize.y,
+                enableRandomWrite: false);
+            ConfigureDlssNeuralRenderingTexture(
+                m_DlssNeuralRenderingOutput,
+                "DLSSNROutput",
+                outputSize.x,
+                outputSize.y,
+                enableRandomWrite: true);
+            m_DlssNeuralRenderingInputViewport = new Rect(
+                0f,
+                0f,
+                Mathf.Max(1, inputSize.x),
+                Mathf.Max(1, inputSize.y));
+        }
+
+        private void SetDlssNeuralRenderingInputs(
+            RenderGraphTexture depthTexture,
+            RenderGraphTexture motionVectorsTexture)
+        {
+            if (ReferenceEquals(m_DlssNeuralRenderingDepth, depthTexture)
+                && ReferenceEquals(m_DlssNeuralRenderingMotionVectors, motionVectorsTexture))
+            {
+                return;
+            }
+
+            m_DlssNeuralRenderingDepth = depthTexture;
+            m_DlssNeuralRenderingMotionVectors = motionVectorsTexture;
+            m_IsPassResourceLayoutDirty = true;
+        }
+
+        private bool CanExecuteDlssNeuralRendering()
+        {
+            return m_DlssNeuralRenderingActive
+                && m_DlssNeuralRenderingPass != null
+                && m_CameraData?.camera != null
+                && m_FinalBlitOutput?.innerHandle.IsValid() == true
+                && m_DlssNeuralRenderingDepth?.innerHandle.IsValid() == true
+                && m_DlssNeuralRenderingMotionVectors?.innerHandle.IsValid() == true
+                && m_DlssNeuralRenderingOutput?.innerHandle.IsValid() == true;
+        }
+
+        private static void ConfigureDlssNeuralRenderingTexture(
+            RenderGraphTexture texture,
+            string name,
+            int width,
+            int height,
+            bool enableRandomWrite)
+        {
+            if (texture?.desc == null)
+                return;
+
+            var descriptor = texture.desc;
+            descriptor.Name = name;
+            descriptor.Width = Mathf.Max(1, width);
+            descriptor.Height = Mathf.Max(1, height);
+            descriptor.Slices = 1;
+            descriptor.Dimension = TextureDimension.Tex2D;
+            descriptor.ColorFormat = GraphicsFormat.R16G16B16A16_SFloat;
+            descriptor.DepthBufferBits = DepthBits.None;
+            descriptor.MsaaSamples = MSAASamples.None;
+            descriptor.FilterMode = FilterMode.Bilinear;
+            descriptor.WrapMode = TextureWrapMode.Clamp;
+            descriptor.AnisoLevel = 1;
+            descriptor.MipMapBias = 0f;
+            descriptor.ClearBuffer = false;
+            descriptor.ClearColor = Color.clear;
+            descriptor.IsShadowMap = false;
+            descriptor.EnableRandomWrite = enableRandomWrite;
+            descriptor.BindTextureMS = false;
+            descriptor.UseDynamicScale = false;
+            descriptor.UseDynamicScaleExplicit = false;
+            descriptor.ScaleFactor = Vector2.one;
+            descriptor.UseMipMap = false;
+            descriptor.AutoGenerateMips = false;
+            descriptor.MipCount = 1;
+        }
+#endif
 
         private static long HashFrame(int frame, int state)
         {

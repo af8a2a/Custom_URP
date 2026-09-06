@@ -227,7 +227,10 @@ namespace VividRP.Runtime
                 return;
             }
 
-            var nonJitteredProjectionMatrix = currentCamera.GetNonJitteredProjectionMatrix();
+            // The pipeline has already stored the original Scene View projection before applying jitter.
+            var nonJitteredProjectionMatrix = currentCamera.cameraType == CameraType.SceneView
+                ? currentCamera.nonJitteredProjectionMatrix
+                : currentCamera.GetNonJitteredProjectionMatrix();
             var projectionMatrix = currentCamera.GetProjectionMatrix();
             var jitterMatrix = projectionMatrix * nonJitteredProjectionMatrix.inverse;
             var jitter = new Vector2(jitterMatrix.m03, jitterMatrix.m13);

@@ -50,7 +50,6 @@ namespace VividRP.Runtime.RenderPass.Core
         private TSRUpscalerPass m_TsrPass;
 #if DLSS_PLUGIN_INTEGRATE
         private DLSSPass m_DlssPass;
-        private DLSSNeuralRenderingPass m_DlssNeuralRenderingPass;
 #endif
         private int m_TaaKernel = -1;
         private int m_Width = 1;
@@ -102,7 +101,6 @@ namespace VividRP.Runtime.RenderPass.Core
             m_TsrPass = new TSRUpscalerPass();
 #if DLSS_PLUGIN_INTEGRATE
             m_DlssPass = new DLSSPass();
-            m_DlssNeuralRenderingPass = new DLSSNeuralRenderingPass();
 #endif
         }
 
@@ -122,6 +120,20 @@ namespace VividRP.Runtime.RenderPass.Core
             m_ResetHistory = antialiasingData != null && antialiasingData.resetHistory;
             m_Jitter = temporalData != null ? temporalData.jitter : Vector2.zero;
             m_PreviousJitter = temporalData != null ? temporalData.previousJitter : Vector2.zero;
+
+#if DLSS_PLUGIN_INTEGRATE
+            var hasNeuralRenderingInputs = m_EffectiveMode == VividAntialiasingMode.DLSSNeuralRendering
+                && HasTemporalInputs();
+            if (antialiasingData != null)
+            {
+                antialiasingData.neuralRenderingDepthTexture = hasNeuralRenderingInputs
+                    ? CameraDepth
+                    : null;
+                antialiasingData.neuralRenderingMotionVectorsTexture = hasNeuralRenderingInputs
+                    ? MotionVectors
+                    : null;
+            }
+#endif
 
             UpdateOutputDescriptor(cameraData, antialiasingData);
             PrepareTaaHistory(cameraData);
@@ -186,7 +198,7 @@ namespace VividRP.Runtime.RenderPass.Core
                         return;
                     break;
                 case VividAntialiasingMode.DLSSNeuralRendering:
-                    if (TryRecordDlssNeuralRenderingPass(context))
+                    if (TryRegisterPassthrough(context))
                         return;
                     break;
 #endif
@@ -220,8 +232,6 @@ namespace VividRP.Runtime.RenderPass.Core
 #if DLSS_PLUGIN_INTEGRATE
             m_DlssPass?.Dispose();
             m_DlssPass = null;
-            m_DlssNeuralRenderingPass?.Dispose();
-            m_DlssNeuralRenderingPass = null;
 #endif
             m_ComputeShader = null;
             m_TaaKernel = -1;
@@ -459,31 +469,6 @@ namespace VividRP.Runtime.RenderPass.Core
                 m_ResetHistory);
         }
 
-        private bool TryRecordDlssNeuralRenderingPass(RenderGraphRecordingContext context)
-        {
-            if (m_DlssNeuralRenderingPass == null || !HasTemporalInputs())
-                return false;
-
-            var cameraData = context.FrameData.Get<VividCameraData>();
-            if (cameraData?.camera == null)
-                return false;
-
-            var antialiasingData = context.FrameData.Get<VividAntialiasingData>();
-            var inputSize = antialiasingData?.renderSize ?? new Vector2Int(m_Width, m_Height);
-            var outputSize = antialiasingData?.outputSize
-                ?? ResolveOutputDimensions(cameraData, antialiasingData);
-            return m_DlssNeuralRenderingPass.Record(
-                context.RenderGraph,
-                cameraData,
-                Color,
-                CameraDepth,
-                MotionVectors,
-                AntialiasingOutput,
-                inputSize,
-                outputSize,
-                context.TextureCache,
-                m_ResetHistory);
-        }
 #endif
 
         private bool TryRecordStpPass(RenderGraphRecordingContext context)
@@ -706,7 +691,11 @@ namespace VividRP.Runtime.RenderPass.Core
 
             var outputSize = ResolveOutputDimensions(cameraData, antialiasingData);
 
-            if (m_EffectiveMode == VividAntialiasingMode.None)
+            var usesPassthroughOutput = m_EffectiveMode == VividAntialiasingMode.None;
+#if DLSS_PLUGIN_INTEGRATE
+            usesPassthroughOutput |= m_EffectiveMode == VividAntialiasingMode.DLSSNeuralRendering;
+#endif
+            if (usesPassthroughOutput)
             {
                 outputDescriptor.Name = "AntialiasingOutput";
                 outputDescriptor.Width = Mathf.Max(1, outputSize.x);
@@ -785,8 +774,7 @@ namespace VividRP.Runtime.RenderPass.Core
             }
 
 #if DLSS_PLUGIN_INTEGRATE
-            if (m_EffectiveMode == VividAntialiasingMode.DeepLearningSuperSampling
-                || m_EffectiveMode == VividAntialiasingMode.DLSSNeuralRendering)
+            if (m_EffectiveMode == VividAntialiasingMode.DeepLearningSuperSampling)
                 return antialiasingData?.outputSize ?? new Vector2Int(m_Width, m_Height);
 #endif
 

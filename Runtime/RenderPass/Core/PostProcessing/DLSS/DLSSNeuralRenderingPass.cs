@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Rendering;
-using UnityEngine.Rendering.RenderGraphModule;
 
 namespace VividRP.Runtime.RenderPass.Core
 {
@@ -13,14 +12,8 @@ namespace VividRP.Runtime.RenderPass.Core
     {
         private const int CameraStateExpirationFrames = 400;
 
-        private static readonly ProfilerMarker s_RecordGraphMarker =
-            new("VividRP.RenderPass.RecordGraph/DLSS 5 Neural Rendering");
         private static readonly ProfilerMarker s_RecordMarker =
             new("VividRP.RenderPass.Record/DLSS 5 Neural Rendering");
-        private static readonly ProfilingSampler s_ProfilingSampler =
-            new("DLSS 5 Neural Rendering");
-        private static readonly BaseRenderFunc<PassData, UnsafeGraphContext> s_RenderFunc =
-            ExecutePass;
 
         private readonly Dictionary<EntityId, CameraState> m_CameraStates = new();
         private readonly List<EntityId> m_ExpiredCameraIds = new();
@@ -28,81 +21,59 @@ namespace VividRP.Runtime.RenderPass.Core
         public bool IsSupported =>
             DLSSExtension.Initialize() && DLSSExtension.IsNeuralRenderingSupported;
 
-        public bool Record(
-            RenderGraph renderGraph,
+        internal bool Execute(
+            CommandBuffer cmd,
             VividCameraData cameraData,
-            RenderGraphTexture sourceTexture,
-            RenderGraphTexture depthTexture,
-            RenderGraphTexture motionTexture,
-            RenderGraphTexture outputTexture,
-            Vector2Int inputSize,
-            Vector2Int outputSize,
-            Dictionary<RenderGraphTexture, TextureHandle> textureCache,
+            RenderTexture source,
+            RenderTexture depth,
+            RenderTexture motionVectors,
+            RenderTexture output,
             bool resetHistory)
         {
-            using var recordGraphScope = s_RecordGraphMarker.Auto();
-            if (!IsSupported
-                || renderGraph == null
-                || cameraData?.camera == null
-                || sourceTexture?.innerHandle.IsValid() != true
-                || depthTexture?.innerHandle.IsValid() != true
-                || motionTexture?.innerHandle.IsValid() != true
-                || outputTexture?.desc == null
-                || inputSize.x <= 0
-                || inputSize.y <= 0
-                || outputSize.x <= 0
-                || outputSize.y <= 0)
-            {
+            using var recordScope = s_RecordMarker.Auto();
+            if (cmd == null || source == null || output == null)
                 return false;
+
+            if (!IsSupported || cameraData?.camera == null || depth == null || motionVectors == null)
+            {
+                cmd.Blit(source, output);
+                return true;
             }
 
             VividAdditionalCameraData additionalData = cameraData.additionalData;
             bool upscaling = additionalData != null
                 && additionalData.dlssNeuralRenderingUpscaling
-                && outputSize.x == inputSize.x * 2
-                && outputSize.y == inputSize.y * 2;
+                && output.width == source.width * 2
+                && output.height == source.height * 2;
             CameraState cameraState = GetOrCreateCameraState(
                 cameraData.camera,
                 cameraData.frameIndex);
             CleanupExpiredCameraStates(cameraData.frameIndex);
 
-            TextureHandle outputHandle = renderGraph.CreateTexture(outputTexture.desc);
-            using (var builder = renderGraph.AddUnsafePass<PassData>(
-                       "DLSS 5 Neural Rendering",
-                       out PassData passData,
-                       s_ProfilingSampler))
+            var parameters = new ExecutionParameters
             {
-                passData.State = cameraState;
-                passData.Source = sourceTexture.innerHandle;
-                passData.Depth = depthTexture.innerHandle;
-                passData.MotionVectors = motionTexture.innerHandle;
-                passData.Output = outputHandle;
-                passData.ResetHistory = resetHistory;
-                passData.Upscaling = upscaling;
-                passData.Preset = additionalData != null
+                ResetHistory = resetHistory,
+                Upscaling = upscaling,
+                Preset = additionalData != null
                     ? additionalData.dlssNeuralRenderingPreset
-                    : DLSSNeuralRenderingPreset.Default;
-                passData.Style = additionalData != null
+                    : DLSSNeuralRenderingPreset.Default,
+                Style = additionalData != null
                     ? additionalData.dlssNeuralRenderingStyle
-                    : DLSSNeuralRenderingStyle.Default;
-                passData.Intensity = additionalData?.dlssNeuralRenderingIntensity ?? 1.0f;
-                passData.LocalToneStrength = additionalData?.dlssNeuralRenderingLocalToneStrength ?? 1.0f;
-                passData.LocalStructureStrength = additionalData?.dlssNeuralRenderingLocalStructureStrength ?? 1.0f;
-                passData.SkinStructureStrength = additionalData?.dlssNeuralRenderingSkinStructureStrength ?? -1.0f;
-                passData.UseAutoMask = additionalData != null && additionalData.dlssNeuralRenderingUseAutoMask;
-                passData.UICorrection = additionalData != null && additionalData.dlssNeuralRenderingUICorrection;
-
-                builder.UseTexture(passData.Source, AccessFlags.Read);
-                builder.UseTexture(passData.Depth, AccessFlags.Read);
-                builder.UseTexture(passData.MotionVectors, AccessFlags.Read);
-                builder.SetRandomAccessAttachment(passData.Output, 0, AccessFlags.WriteAll);
-                builder.AllowPassCulling(false);
-                builder.AllowGlobalStateModification(true);
-                builder.SetRenderFunc(s_RenderFunc);
-            }
-
-            outputTexture.innerHandle = outputHandle;
-            textureCache[outputTexture] = outputHandle;
+                    : DLSSNeuralRenderingStyle.Default,
+                Intensity = additionalData?.dlssNeuralRenderingIntensity ?? 1.0f,
+                LocalToneStrength = additionalData?.dlssNeuralRenderingLocalToneStrength ?? 1.0f,
+                LocalStructureStrength = additionalData?.dlssNeuralRenderingLocalStructureStrength ?? 1.0f,
+                SkinStructureStrength = additionalData?.dlssNeuralRenderingSkinStructureStrength ?? -1.0f,
+                UseAutoMask = additionalData != null && additionalData.dlssNeuralRenderingUseAutoMask,
+                UICorrection = additionalData != null && additionalData.dlssNeuralRenderingUICorrection,
+            };
+            cameraState.Execute(
+                cmd,
+                source,
+                depth,
+                motionVectors,
+                output,
+                in parameters);
             return true;
         }
 
@@ -150,20 +121,8 @@ namespace VividRP.Runtime.RenderPass.Core
             }
         }
 
-        private static void ExecutePass(PassData data, UnsafeGraphContext context)
+        private struct ExecutionParameters
         {
-            using var recordScope = s_RecordMarker.Auto();
-            CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
-            data.State.Execute(cmd, data);
-        }
-
-        internal sealed class PassData
-        {
-            public CameraState State;
-            public TextureHandle Source;
-            public TextureHandle Depth;
-            public TextureHandle MotionVectors;
-            public TextureHandle Output;
             public bool ResetHistory;
             public bool Upscaling;
             public DLSSNeuralRenderingPreset Preset;
@@ -176,36 +135,32 @@ namespace VividRP.Runtime.RenderPass.Core
             public bool UICorrection;
         }
 
-        internal sealed class CameraState : IDisposable
+        private sealed class CameraState : IDisposable
         {
             private readonly DLSSNeuralRenderingSettings m_Settings = new();
             private DLSSNeuralRendering m_NeuralRendering;
 
             public int LastUsedFrame { get; set; }
 
-            public void Execute(CommandBuffer cmd, PassData data)
+            public void Execute(
+                CommandBuffer cmd,
+                RenderTexture source,
+                RenderTexture depth,
+                RenderTexture motionVectors,
+                RenderTexture output,
+                in ExecutionParameters parameters)
             {
-                if (cmd == null || data == null)
-                    return;
-
-                RenderTexture source = data.Source;
-                RenderTexture depth = data.Depth;
-                RenderTexture motionVectors = data.MotionVectors;
-                RenderTexture output = data.Output;
-                if (source == null || depth == null || motionVectors == null || output == null)
-                    return;
-
                 m_NeuralRendering ??= new DLSSNeuralRendering();
-                m_Settings.Preset = data.Preset;
-                m_Settings.Style = data.Style;
-                m_Settings.Intensity = data.Intensity;
-                m_Settings.LocalToneStrength = data.LocalToneStrength;
-                m_Settings.LocalStructureStrength = data.LocalStructureStrength;
-                m_Settings.SkinStructureStrength = data.SkinStructureStrength;
+                m_Settings.Preset = parameters.Preset;
+                m_Settings.Style = parameters.Style;
+                m_Settings.Intensity = parameters.Intensity;
+                m_Settings.LocalToneStrength = parameters.LocalToneStrength;
+                m_Settings.LocalStructureStrength = parameters.LocalStructureStrength;
+                m_Settings.SkinStructureStrength = parameters.SkinStructureStrength;
                 m_Settings.DepthInverted = SystemInfo.usesReversedZBuffer;
-                m_Settings.UseAutoMask = data.UseAutoMask;
-                m_Settings.UICorrection = data.UICorrection;
-                m_Settings.Upscaling = data.Upscaling;
+                m_Settings.UseAutoMask = parameters.UseAutoMask;
+                m_Settings.UICorrection = parameters.UICorrection;
+                m_Settings.Upscaling = parameters.Upscaling;
                 m_Settings.MotionVectorScale = Vector2.one;
 
                 m_NeuralRendering.Render(
@@ -216,7 +171,7 @@ namespace VividRP.Runtime.RenderPass.Core
                     motionVectors,
                     DLSSMotionVectorEncoding.VividNormalizedUV,
                     m_Settings,
-                    data.ResetHistory);
+                    parameters.ResetHistory);
             }
 
             public void Dispose()

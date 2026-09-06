@@ -163,7 +163,7 @@ namespace VividRP.Editor.Tests
 
 #if DLSS_PLUGIN_INTEGRATE
         [Test]
-        public void Prepare_ConfiguresNeuralRenderingOutputDimensionsFromOutputSize()
+        public void Prepare_NeuralRenderingDefersUpscalingUntilAfterFinalBlit()
         {
             var pass = new AntialiasingPass();
             var frameData = CreateFrameData(
@@ -176,9 +176,36 @@ namespace VividRP.Editor.Tests
             pass.Prepare(frameData);
 
             var outputTexture = GetTextureField(pass, "AntialiasingOutput");
-            Assert.That(outputTexture.desc.Width, Is.EqualTo(1920));
-            Assert.That(outputTexture.desc.Height, Is.EqualTo(1080));
-            Assert.That(outputTexture.desc.EnableRandomWrite, Is.True);
+            Assert.That(outputTexture.desc.Width, Is.EqualTo(960));
+            Assert.That(outputTexture.desc.Height, Is.EqualTo(540));
+            Assert.That(outputTexture.desc.EnableRandomWrite, Is.False);
+        }
+
+        [Test]
+        public void Prepare_NeuralRenderingPublishesGuidesForFinalBlit()
+        {
+            var pass = new AntialiasingPass();
+            var depth = RenderGraphTexture.CreateInput(
+                "CameraDepth",
+                GraphicsFormat.None,
+                DepthBits.Depth32);
+            var motionVectors = RenderGraphTexture.CreateInput(
+                "MotionVectors",
+                GraphicsFormat.R16G16_SFloat);
+            SetField(pass, "CameraDepth", depth);
+            SetField(pass, "MotionVectors", motionVectors);
+            var frameData = CreateFrameData(
+                960,
+                540,
+                VividAntialiasingMode.DLSSNeuralRendering,
+                new Vector2Int(960, 540),
+                new Vector2Int(1920, 1080));
+
+            pass.Prepare(frameData);
+
+            var antialiasingData = frameData.Get<VividAntialiasingData>();
+            Assert.That(antialiasingData.neuralRenderingDepthTexture, Is.SameAs(depth));
+            Assert.That(antialiasingData.neuralRenderingMotionVectorsTexture, Is.SameAs(motionVectors));
         }
 
         [Test]

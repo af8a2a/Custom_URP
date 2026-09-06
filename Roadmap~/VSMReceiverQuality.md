@@ -109,6 +109,12 @@ page pressure must be measured, not inferred from smaller shadow teeth.
   `CascadedShadowSettingsVolumeTests`. Compilation and the isolated GPU probe
   do not replace those tests or certify the zero-allocation assertion.
 
-Scene-level Sponza comparison, full-frame/worker GC profiling, moving-camera
-stability, budget-pressure recovery and the P5-A live timing sweep remain open.
+The current Sponza Game camera now has a matched 4K PCF trajectory comparison:
+density off and targets 1/2/4 px, each with 601 poses and 69 ROI captures,
+including 41 consecutive recovery frames. All enabled targets exceed the
+256-page budget in most or all sampled frames; no enabled target qualifies as
+a default. The off run has transient unmapped fallback at steps 460–461,
+separate from sustained density-on budget pressure. See [density findings](VSMDensityFindings.md).
+The original wall's full quality matrix, page-identity recovery trace, camera
+cuts, full-frame/worker GC profiling and exact Game GPU timing remain open.
 No new default quality tier or performance improvement is claimed.

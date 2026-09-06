@@ -5,6 +5,10 @@ namespace VividRP.Runtime.RenderPass.Core
     // Cached samplers: no frame-dependent names or recurring allocations.
     internal static class VSMProfiling
     {
+        internal static readonly ProfilingSampler Allocate = new("VSM.Allocate");
+        internal static readonly ProfilingSampler Clear = new("VSM.ClearPhysicalPages");
+        internal static readonly ProfilingSampler Finalize = new("VSM.FinalizePages");
+        internal static readonly ProfilingSampler DynamicRaster = new("VSM.DynamicRaster");
         internal static readonly ProfilingSampler Layout = new("VSM.LayoutRemap");
         internal static readonly ProfilingSampler Invalidate = new("VSM.InvalidateStatic");
         internal static readonly ProfilingSampler StaticCull = new("VSM.StaticCasterCull");

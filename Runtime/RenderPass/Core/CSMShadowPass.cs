@@ -1249,21 +1249,22 @@ namespace VividRP.Runtime.RenderPass.Core
                 return false;
             }
 
-            nativeCmd.BeginSample("VSM.Allocate");
-            BindVirtualShadowMapPageManagementBuffers(
-                nativeCmd,
-                m_VirtualShadowMapAllocatePagesKernel,
-                pageTable,
-                pageMetadata,
-                physicalPageOwners,
-                allocatorCounters);
-            nativeCmd.DispatchCompute(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapAllocatePagesKernel,
-                1,
-                1,
-                1);
-            nativeCmd.EndSample("VSM.Allocate");
+            using (new ProfilingScope(nativeCmd, VSMProfiling.Allocate))
+            {
+                BindVirtualShadowMapPageManagementBuffers(
+                    nativeCmd,
+                    m_VirtualShadowMapAllocatePagesKernel,
+                    pageTable,
+                    pageMetadata,
+                    physicalPageOwners,
+                    allocatorCounters);
+                nativeCmd.DispatchCompute(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapAllocatePagesKernel,
+                    1,
+                    1,
+                    1);
+            }
 
             nativeCmd.SetGlobalBuffer(VirtualShadowMapProjectionSet.BufferId,
                 VirtualShadowMapPrototypeRuntime.Projections.Buffer);
@@ -1335,35 +1336,36 @@ namespace VividRP.Runtime.RenderPass.Core
                 }
             }
 
-            nativeCmd.BeginSample("VSM.ClearPhysicalPages");
-            nativeCmd.SetComputeBufferParam(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapClearPhysicalPagesKernel,
-                VSMPrototypePageMetadataId,
-                pageMetadata);
-            nativeCmd.SetComputeBufferParam(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapClearPhysicalPagesKernel,
-                VSMPrototypePhysicalPageOwnersId,
-                physicalPageOwners);
-            nativeCmd.SetComputeTextureParam(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapClearPhysicalPagesKernel,
-                VSMPrototypeStaticPhysicalPageRWId,
-                staticPhysicalPage);
-            nativeCmd.SetComputeTextureParam(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapClearPhysicalPagesKernel,
-                VSMPrototypeDynamicPhysicalPageRWId,
-                dynamicPhysicalPage);
-            SetVirtualShadowMapPageManagementParameters(nativeCmd);
-            nativeCmd.DispatchCompute(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapClearPhysicalPagesKernel,
-                CoreUtils.DivRoundUp(VirtualShadowMapPrototypeRuntime.PageSize, 8),
-                CoreUtils.DivRoundUp(VirtualShadowMapPrototypeRuntime.PageSize, 8),
-                physicalPageCapacity);
-            nativeCmd.EndSample("VSM.ClearPhysicalPages");
+            using (new ProfilingScope(nativeCmd, VSMProfiling.Clear))
+            {
+                nativeCmd.SetComputeBufferParam(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapClearPhysicalPagesKernel,
+                    VSMPrototypePageMetadataId,
+                    pageMetadata);
+                nativeCmd.SetComputeBufferParam(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapClearPhysicalPagesKernel,
+                    VSMPrototypePhysicalPageOwnersId,
+                    physicalPageOwners);
+                nativeCmd.SetComputeTextureParam(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapClearPhysicalPagesKernel,
+                    VSMPrototypeStaticPhysicalPageRWId,
+                    staticPhysicalPage);
+                nativeCmd.SetComputeTextureParam(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapClearPhysicalPagesKernel,
+                    VSMPrototypeDynamicPhysicalPageRWId,
+                    dynamicPhysicalPage);
+                SetVirtualShadowMapPageManagementParameters(nativeCmd);
+                nativeCmd.DispatchCompute(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapClearPhysicalPagesKernel,
+                    CoreUtils.DivRoundUp(VirtualShadowMapPrototypeRuntime.PageSize, 8),
+                    CoreUtils.DivRoundUp(VirtualShadowMapPrototypeRuntime.PageSize, 8),
+                    physicalPageCapacity);
+            }
 
             bool canDrawStaticMeshletCasters = false;
             GraphicsBuffer staticRequestsBuffer = null;
@@ -1427,20 +1429,21 @@ namespace VividRP.Runtime.RenderPass.Core
                 nativeCmd.ClearRandomWriteTargets();
             }
 
-            nativeCmd.BeginSample("VSM.FinalizePages");
-            nativeCmd.SetComputeBufferParam(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapFinalizeDirtyPagesKernel,
-                VSMPrototypePageMetadataId,
-                pageMetadata);
-            SetVirtualShadowMapPageManagementParameters(nativeCmd);
-            nativeCmd.DispatchCompute(
-                m_VirtualShadowMapPageManagementCompute,
-                m_VirtualShadowMapFinalizeDirtyPagesKernel,
-                CoreUtils.DivRoundUp(pageTableEntryCount, 64),
-                1,
-                1);
-            nativeCmd.EndSample("VSM.FinalizePages");
+            using (new ProfilingScope(nativeCmd, VSMProfiling.Finalize))
+            {
+                nativeCmd.SetComputeBufferParam(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapFinalizeDirtyPagesKernel,
+                    VSMPrototypePageMetadataId,
+                    pageMetadata);
+                SetVirtualShadowMapPageManagementParameters(nativeCmd);
+                nativeCmd.DispatchCompute(
+                    m_VirtualShadowMapPageManagementCompute,
+                    m_VirtualShadowMapFinalizeDirtyPagesKernel,
+                    CoreUtils.DivRoundUp(pageTableEntryCount, 64),
+                    1,
+                    1);
+            }
 
             bool canDrawDynamicMeshletCasters = false;
             GraphicsBuffer dynamicRequestsBuffer = null;
@@ -1483,28 +1486,28 @@ namespace VividRP.Runtime.RenderPass.Core
                 }
             }
 
-            nativeCmd.BeginSample("VSM.DynamicRaster");
-            nativeCmd.SetGlobalInt(VSMPrototypeCasterLayerId, 1);
-            CoreUtils.SetRenderTarget(
-                nativeCmd,
-                rasterDepth,
-                ClearFlag.Depth,
-                Color.black,
-                depthSlice: -1);
-            nativeCmd.SetRandomWriteTarget(0, dynamicPhysicalPage);
-            if (canDrawDynamicMeshletCasters)
+            using (new ProfilingScope(nativeCmd, VSMProfiling.DynamicRaster))
             {
-                DrawMeshletVirtualShadowMapPages(
+                nativeCmd.SetGlobalInt(VSMPrototypeCasterLayerId, 1);
+                CoreUtils.SetRenderTarget(
                     nativeCmd,
-                    meshletContext.System,
-                    dynamicPageRequestsBuffer,
-                    dynamicPageArgsBuffer,
-                    meshletContext.VirtualTextureReady,
-                    meshletContext.VirtualTextureBinding);
+                    rasterDepth,
+                    ClearFlag.Depth,
+                    Color.black,
+                    depthSlice: -1);
+                nativeCmd.SetRandomWriteTarget(0, dynamicPhysicalPage);
+                if (canDrawDynamicMeshletCasters)
+                {
+                    DrawMeshletVirtualShadowMapPages(
+                        nativeCmd,
+                        meshletContext.System,
+                        dynamicPageRequestsBuffer,
+                        dynamicPageArgsBuffer,
+                        meshletContext.VirtualTextureReady,
+                        meshletContext.VirtualTextureBinding);
+                }
+                nativeCmd.ClearRandomWriteTargets();
             }
-            nativeCmd.ClearRandomWriteTargets();
-
-            nativeCmd.EndSample("VSM.DynamicRaster");
             if (m_HasUnityShadowCasters)
             {
                 using var unityScope = new ProfilingScope(nativeCmd, VSMProfiling.UnityRaster);

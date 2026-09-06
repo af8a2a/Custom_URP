@@ -7,6 +7,11 @@ namespace VividRP.Runtime.RenderPass.Core
 {
     public sealed class CSMShadowResolvePass : ComputePass
     {
+#if UNITY_EDITOR
+        // Opt-in diagnostics run after resolve with this camera's live graph resources.
+        // No subscriber means no texture resolution, dispatch, readback, or allocation.
+        internal static event System.Action<ComputePassContext, Texture, Texture, Texture> EditorReceiverCapture;
+#endif
         private const int ThreadGroupSizeX = 8;
         private const int ThreadGroupSizeY = 8;
         private const int ScreenSpaceShadowTileSize = 16;
@@ -524,6 +529,10 @@ namespace VividRP.Runtime.RenderPass.Core
             if (m_VirtualShadowMapRequestCollectionActive)
                 VirtualShadowMapPrototypeRuntime.MarkReceiverFeedbackProduced(
                     m_CameraEntityId, m_FrameIndex);
+#if UNITY_EDITOR
+            EditorReceiverCapture?.Invoke(context, m_DepthTexture.innerHandle.ResolveTexture(),
+                m_GBuffer1.innerHandle.ResolveTexture(), m_DirectionalShadowTexture.innerHandle.ResolveTexture());
+#endif
         }
 
         public override void Dispose()

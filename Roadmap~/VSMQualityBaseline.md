@@ -2,7 +2,20 @@
 
 Status: instrumentation and reproducible protocol implemented, 2026-09-05.
 This milestone does not change resolution, layer selection, filtering or budgets.
-The six-configuration scene/performance sweep remains to be measured on target hardware.
+Update 2026-09-06: a separate six-configuration static Play Mode performance run
+has completed; see the [audit](Baselines/20260905_113329_d0e8beb7/README.md) and
+[next optimization plan](VSMOptimizationPlan.md). It uses a different camera
+from the wall capture below. Timing-source validation, repeatability and this
+wall's complete quality sweep remain open; its timing cells are not backfilled.
+Phase 0 update 2026-09-06: the repaint experiment now confirms a recorder-window
+timing influence. The current Game camera has two complete diagonal quality runs
+(601 poses / 31 capture groups each), with all 93 ROI data files identical between
+runs, plus an interrupted-save check. See [findings and reproduction](VSMPhase0Findings.md).
+Exact Game GPU-frame attribution and the original wall's quality matrix remain open.
+Follow-up: four matched 4K PCF density configurations now have 69 ROI captures
+each, including 41 consecutive frames around the transient fallback. Targets
+1/2/4 px all fail the current 256-page budget gate; density off remains the
+reference. See [density comparison and recovery findings](VSMDensityFindings.md).
 P5-B adds an opt-in [receiver quality policy](VSMReceiverQuality.md). The capture
 and six-configuration P5-A reference below use Screen Density off; record that
 policy explicitly when comparing newer results.
@@ -56,7 +69,9 @@ Remove/disable the node for performance captures. No diagnostic texture or
 dispatch is added to ordinary graphs; production kernels compile without the
 instrumentation define. At 1080p, the two debug outputs alone cost about 39.6 MiB;
 debug replay duplicates receiver work and must not be included in shipping cost.
-There are no automatic GPU readbacks or per-pixel global statistic atomics.
+The graph node itself has no automatic GPU readbacks or per-pixel global statistic atomics.
+The explicit Editor quality-reproduction menu adds bounded asynchronous readbacks
+after resolve and exports diagnostics separately from performance measurements.
 
 ## Timing markers
 
@@ -172,7 +187,7 @@ historical, not validation of the later receiver-policy changes):
   limitation without changing production pool behavior.
 
 Still pending: connect the node in the scene graph and visually inspect the
-fixed ROI; perform the six-configuration live timing/quality sweep; verify
+fixed ROI; complete the wall quality sweep and validate/repeat the live timings; verify
 movement/cuts, budget pressure, VT and mixed-caster cases in that scene; and
 profile warmed allocations across all relevant threads. Other API/device
 coverage is not established by the DX12 result. No production graph, Volume

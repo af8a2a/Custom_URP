@@ -576,7 +576,7 @@ namespace VividRP.Editor.Tests
             Assert.That(f.Run("ResolveReceivers", new[] { float4.zero })[0].x, Is.EqualTo(1));
             for (int page = 0; page < 12; page++)
             {
-                Assert.That(f.MetadataData[page].x, Is.EqualTo(page >= 8 ? 257u : 1u));
+                Assert.That(f.MetadataData[page].x, Is.EqualTo(page >= 8 ? 257u : page < 4 ? 513u : 2049u));
                 Assert.That(f.MetadataData[page].z, Is.EqualTo(7));
             }
         }
@@ -589,6 +589,16 @@ namespace VividRP.Editor.Tests
             f.Run("MarkFootprints", new[] { new float4(0, 0, 0, 2), new float4(1, 0, 0, 0) });
             for (int page = 0; page < 12; page++)
                 Assert.That(f.MetadataData[page].x, Is.EqualTo(page == 8 ? 257u : 0u));
+        }
+
+        [Test]
+        public void Feedback_SharedPageRetainsPrimaryAndTransitionDemand()
+        {
+            using var f = new Fixture();
+            f.Upload();
+            f.Run("MarkFootprints", new[] { new float4(.5f, .5f, 512, 0), new float4(.5f, .5f, 1024, 0) });
+            for (int page = 0; page < 4; page++)
+                Assert.That(f.MetadataData[page].x, Is.EqualTo(1537u));
         }
 
         [Test]
@@ -679,7 +689,7 @@ namespace VividRP.Editor.Tests
         public void FeedbackReset_DropsOldPriorityWithoutDiscardingCompletedDepth()
         {
             using var f = new Fixture(allocator: true);
-            f.Map(11, 3); f.MetadataData[11].x |= 257;
+            f.Map(11, 3); f.MetadataData[11].x |= 3841;
             f.Upload();
             int kernel = f.Shader.FindKernel("VSMPrototypeResetReceiverFeedback");
             f.Shader.SetBuffer(kernel, "_VSMPrototypePageMetadata", f.Metadata);
@@ -688,6 +698,149 @@ namespace VividRP.Editor.Tests
             Assert.That(f.MetadataData[11].x, Is.EqualTo(10));
             Assert.That(f.MetadataData[11].y, Is.EqualTo(4));
             Assert.That(f.MetadataData[11].z, Is.Zero);
+        }
+
+        [TestCase(0)]
+        [TestCase(7)]
+        public void Allocator_ColdPoolPrioritizesRolesAboveClipmapLevel(int frame)
+        {
+            using var f = new Fixture(allocator: true);
+            f.Shader.SetInt("_VSMPrototypePhysicalPageCapacity", 4);
+            f.Shader.SetInt("_VSMPrototypeFeedbackFrameIndex", frame);
+            f.MetadataData[0] = new uint4(513, 0, (uint)frame, 0);
+            f.MetadataData[1] = new uint4(1025, 0, (uint)frame, 0);
+            f.MetadataData[2] = new uint4(1537, 0, (uint)frame, 0); // Shared primary/transition: primary wins.
+            f.MetadataData[4] = new uint4(1, 0, (uint)frame, 0);
+            f.MetadataData[5] = new uint4(3073, 0, (uint)frame, 0);
+            f.MetadataData[11] = new uint4(3841, 0, (uint)frame, 0); // Terminal always wins.
+            f.Upload(); f.Allocate();
+            Assert.That(f.TableData[11], Is.EqualTo(1));
+            Assert.That(f.TableData[0], Is.EqualTo(3));
+            Assert.That(f.TableData[2], Is.EqualTo(4));
+            Assert.That(f.TableData[5], Is.EqualTo(2));
+            Assert.That(f.TableData[1] | f.TableData[4], Is.Zero);
+            var counters = new uint[4]; f.Counters.GetData(counters);
+            Assert.That(counters, Is.EqualTo(new uint[] { 4, 6, 4, 2 }));
+            foreach (uint4 metadata in f.MetadataData) Assert.That(metadata.x & 3841u, Is.Zero);
+            Assert.That(f.MetadataData[2].w & 1537u, Is.EqualTo(1537u));
+        }
+
+        [Test]
+        public void Allocator_PrimaryReclaimsFallbackBeforeTransitionAndRemainsStable()
+        {
+            using var f = new Fixture(allocator: true);
+            f.Shader.SetInt("_VSMPrototypePhysicalPageCapacity", 4);
+            f.Map(4, 0); f.Map(5, 1); f.Map(6, 2); f.Map(11, 3);
+            int[] pages = { 0, 4, 5, 6, 11 };
+            uint[] roles = { 513, 513, 1025, 1, 257 };
+            for (int frame = 7; frame < 10; frame++)
+            {
+                for (int i = 0; i < pages.Length; i++)
+                {
+                    f.MetadataData[pages[i]].x |= roles[i];
+                    f.MetadataData[pages[i]].z = (uint)frame;
+                }
+                f.Shader.SetInt("_VSMPrototypeFeedbackFrameIndex", frame);
+                f.Upload(); f.Allocate();
+                Assert.That(f.TableData[0], Is.EqualTo(3));
+                Assert.That(f.TableData[4], Is.EqualTo(1));
+                Assert.That(f.TableData[5], Is.EqualTo(2));
+                Assert.That(f.TableData[11], Is.EqualTo(4));
+                Assert.That(f.TableData[6], Is.Zero);
+                var counters = new uint[4]; f.Counters.GetData(counters);
+                Assert.That(counters, Is.EqualTo(new uint[] { 4, 5, frame == 7 ? 1u : 0u, 1 }));
+                Assert.That(f.MetadataData[6].w & 129u, Is.EqualTo(129u));
+                for (int slot = 0; slot < 4; slot++)
+                    Assert.That(f.TableData[f.OwnerData[slot] - 1], Is.EqualTo(slot + 1));
+            }
+        }
+
+        [Test]
+        public void Allocator_StaleRoleBitsDoNotProtectAResident()
+        {
+            using var f = new Fixture(allocator: true);
+            f.Shader.SetInt("_VSMPrototypePhysicalPageCapacity", 1);
+            f.Map(0, 0); f.MetadataData[0].x |= 3841; f.MetadataData[0].z = 6;
+            f.MetadataData[1] = new uint4(513, 0, 7, 0);
+            f.Upload(); f.Allocate();
+            Assert.That(f.TableData[0], Is.Zero);
+            Assert.That(f.TableData[1], Is.EqualTo(1));
+            Assert.That(f.MetadataData[0].x & 3841u, Is.Zero);
+            Assert.That(f.MetadataData[0].w & 3841u, Is.Zero);
+        }
+
+        [TestCase(64)]
+        [TestCase(8192)]
+        [TestCase(262144)]
+        public void Allocator_RequestBitsetPreservesOrderAcrossWordsAndMaximumLayout(int count)
+        {
+            var shader = Object.Instantiate(AssetDatabase.LoadAssetAtPath<ComputeShader>(
+                "Packages/com.vivid.render-pipelines/Shaders/Core/Private/CSMShadowResolve.compute"));
+            using var table = new GraphicsBuffer(GraphicsBuffer.Target.Structured, count, 4);
+            using var metadata = new GraphicsBuffer(GraphicsBuffer.Target.Structured, count, 16);
+            using var owners = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 4, 4);
+            using var counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 4, 4);
+            try
+            {
+                int levels = count == 64 ? 2 : 16, perLevel = count / levels;
+                int[] indices = { 0, 31, 32, count == 64 ? 33 : 2047, count == 64 ? 34 : 2048, count - 1 };
+                var pages = new int[indices.Length];
+                var data = new uint4[count]; var mappings = new uint[count];
+                for (int i = 0; i < indices.Length; i++)
+                {
+                    pages[i] = (levels - 1 - indices[i] / perLevel) * perLevel + indices[i] % perLevel;
+                    data[pages[i]] = new uint4(i == 0 ? 257u : 513u, 0, 7, 0);
+                }
+                table.SetData(mappings); metadata.SetData(data); owners.SetData(new uint[4]); counters.SetData(new uint[4]);
+                int kernel = shader.FindKernel("VSMPrototypeAllocatePages");
+                shader.SetInt("_VSMProjectionCount", levels);
+                shader.SetInt("_VSMPrototypePageTableEntryCount", count);
+                shader.SetInt("_VSMPrototypePhysicalPageCapacity", 4);
+                shader.SetInt("_VSMPrototypeFeedbackFrameIndex", 7);
+                shader.SetBuffer(kernel, "_VSMPrototypeWritablePageTable", table);
+                shader.SetBuffer(kernel, "_VSMPrototypePageMetadata", metadata);
+                shader.SetBuffer(kernel, "_VSMPrototypePhysicalPageOwners", owners);
+                shader.SetBuffer(kernel, "_VSMPrototypeAllocatorCounters", counters);
+                shader.Dispatch(kernel, 1, 1, 1);
+                table.GetData(mappings); metadata.GetData(data);
+                var counts = new uint[4]; counters.GetData(counts);
+                Assert.That(counts, Is.EqualTo(new uint[] { 4, 6, 4, 2 }));
+                for (int i = 0; i < pages.Length; i++)
+                {
+                    Assert.That(mappings[pages[i]], Is.EqualTo(i < 4 ? (uint)i + 1 : 0u));
+                    Assert.That(data[pages[i]].x & 3841u, Is.Zero);
+                    Assert.That(data[pages[i]].w & 128u, Is.EqualTo(i < 4 ? 0u : 128u));
+                }
+            }
+            finally { Object.DestroyImmediate(shader); }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ReceiverRoles_FollowIntendedBlendIndependentlyOfResidency(bool transition)
+        {
+            using var f = new Fixture();
+            var receiver = new float4(transition ? 2.25f : 0.625f, 0.625f, 0, 0);
+            var expected = new uint[12];
+            for (int resident = 0; resident < 2; resident++)
+            {
+                Array.Clear(f.MetadataData, 0, f.MetadataData.Length);
+                if (resident != 0) for (int page = 0; page < 12; page++) f.Map(page, page);
+                f.Upload(); f.Run("ResolveReceivers", new[] { receiver });
+                bool primary = false, blend = false;
+                for (int page = 0; page < 12; page++)
+                {
+                    uint request = f.MetadataData[page].x & 3841u;
+                    if (resident == 0) expected[page] = request;
+                    else Assert.That(request, Is.EqualTo(expected[page]));
+                    if ((request & 1u) == 0) continue;
+                    Assert.That(request, Is.EqualTo(page < 4 ? 513u : page < 8 ? (transition ? 3073u : 2049u) : 257u));
+                    primary |= (request & 512u) != 0;
+                    blend |= (request & 1024u) != 0;
+                }
+                Assert.That(primary, Is.True);
+                Assert.That(blend, Is.EqualTo(transition));
+            }
         }
 
         [Test]

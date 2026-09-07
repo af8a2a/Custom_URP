@@ -159,5 +159,6 @@ void MarkFootprints(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint)_SamplingCount) return;
     float4 input = _SamplingInputs[id.x];
-    MarkVSMReceiverPage(input.xy, (int)input.w);
+    // z carries the primary/transition/parent role bits for shared-page feedback checks.
+    MarkVSMReceiverPage(input.xy, (int)input.w, (uint)input.z);
 }

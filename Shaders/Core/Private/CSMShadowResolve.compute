@@ -137,7 +137,21 @@ static const uint kVSMPageDebugEvicted = 1u << 6;
 static const uint kVSMPageDebugOverflow = 1u << 7;
 // Live feedback priority, cleared together with Requested after allocation.
 static const uint kVSMPageCoarseRequested = 1u << 8;
-static const uint kVSMPageRequestMask = kVSMPageRequested | kVSMPageCoarseRequested;
+static const uint kVSMPagePrimaryRequested = 1u << 9;
+static const uint kVSMPageTransitionRequested = 1u << 10;
+static const uint kVSMPageParentRequested = 1u << 11;
+static const uint kVSMPageRequestMask = kVSMPageRequested | kVSMPageCoarseRequested
+    | kVSMPagePrimaryRequested | kVSMPageTransitionRequested | kVSMPageParentRequested;
+
+// A page can serve multiple receivers/roles. Atomic OR preserves the strongest
+// demand; the terminal level remains the safety net for any incomplete footprint.
+uint VSMPageRequestPriority(uint flags)
+{
+    if ((flags & (kVSMPageCoarseRequested | kVSMPageParentRequested)) != 0u) return 0u;
+    if ((flags & kVSMPagePrimaryRequested) != 0u) return 1u;
+    if ((flags & kVSMPageTransitionRequested) != 0u) return 2u;
+    return 3u;
+}
 static const uint kVSMMaxPagesPerMeshletRequest = 4u;
 
 #if defined(VIVID_VSM_RECEIVER_DEBUG)
@@ -464,11 +478,43 @@ void VSMRemapPages(uint3 id : SV_DispatchThreadID)
         _VSMPrototypePhysicalPageOwners[table - 1u] = dest + 1u;
 }
 
-[numthreads(1, 1, 1)]
+// One bit per virtual page: at most 16 levels * (16384 / 128)^2 pages.
+// Compact demand in traversal order without an append buffer or extra GPU pass.
+groupshared uint g_VSMRequestedPages[8192];
+
+[numthreads(64, 1, 1)]
 void VSMPrototypeAllocatePages(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
-    // Clipmap scrolling leaves holes. Slot identity must remain stable because
-    // it addresses cached depth; never compact the physical pools themselves.
+    uint pageCount = (uint)_VSMPrototypePageTableEntryCount;
+    uint levelCount = (uint)max(_VSMProjectionCount, 1);
+    uint pagesPerLevel = pageCount / levelCount;
+    uint wordCount = (pageCount + 31u) / 32u;
+    // Snapshot and clear stale feedback in parallel. Each word/page has one writer;
+    // the bitset records coarse-to-fine order, including sub-32-page test layouts.
+    for (uint word = dispatchThreadID.x; word < wordCount; word += 64u)
+    {
+        uint requests = 0u;
+        for (uint bit = 0u; bit < 32u && word * 32u + bit < pageCount; bit++)
+        {
+            uint index = word * 32u + bit;
+            uint page = (levelCount - 1u - index / pagesPerLevel) * pagesPerLevel + index % pagesPerLevel;
+            uint4 metadata = _VSMPrototypePageMetadata[page];
+            bool current = metadata.z == (uint)_VSMPrototypeFeedbackFrameIndex;
+            metadata.w = metadata.x & ~kVSMPageRequestMask;
+            if (current)
+            {
+                metadata.w |= metadata.x & kVSMPageRequestMask;
+                if ((metadata.x & kVSMPageRequested) != 0u) requests |= 1u << bit;
+            }
+            else metadata.x &= ~kVSMPageRequestMask;
+            _VSMPrototypePageMetadata[page] = metadata;
+        }
+        g_VSMRequestedPages[word] = requests;
+    }
+    AllMemoryBarrierWithGroupSync();
+    if (dispatchThreadID.x != 0u) return;
+
+    // Clipmap scrolling leaves holes; keep slot identity for cached depth.
     uint allocatedPageCount = 0u;
     for (uint slot = 0u; slot < (uint)_VSMPrototypePhysicalPageCapacity; slot++)
         allocatedPageCount += _VSMPrototypePhysicalPageOwners[slot] != 0u ? 1u : 0u;
@@ -476,134 +522,122 @@ void VSMPrototypeAllocatePages(uint3 dispatchThreadID : SV_DispatchThreadID)
     uint newlyAllocatedPageCount = 0u;
     uint overflowPageCount = 0u;
 
-    // Snapshot before allocation clears request bits or evicts a later-index page.
-    // Resolve's next-frame feedback updates x/z, leaving this submission visible.
-    for (uint page = 0u; page < (uint)_VSMPrototypePageTableEntryCount; page++)
-    {
-        uint4 metadata = _VSMPrototypePageMetadata[page];
-        metadata.w = metadata.x & ~kVSMPageRequestMask;
-        if (metadata.z == (uint)_VSMPrototypeFeedbackFrameIndex)
-            metadata.w |= metadata.x & kVSMPageRequestMask;
-        _VSMPrototypePageMetadata[page] = metadata;
-    }
-
-    // Fill the fallback chain from coarse to fine. Protecting only the terminal
-    // level lets fine requests starve every intermediate level in a full pool,
-    // so transitions jump straight from fine detail to the lowest resolution.
-    uint levelCount = (uint)max(_VSMProjectionCount, 1);
-    uint pagesPerLevel = (uint)_VSMPrototypePageTableEntryCount / levelCount;
-    for (uint phase = 0u; phase < 2u; phase++)
+    // Keep terminal coverage and one parent per preferred receiver before detail:
+    // primary demand alone can exceed the pool and otherwise jump to the terminal
+    // map. Deeper speculative fallback must not displace primary/transition pages.
+    for (uint phase = 0u; phase < 4u; phase++)
     {
         bool canEvictPages = true;
-        for (uint requestIndex = 0u;
-             requestIndex < (uint)_VSMPrototypePageTableEntryCount;
-             requestIndex++)
+        for (uint word = 0u; word < wordCount; word++)
         {
-            uint virtualPageIndex = phase == 0u ? requestIndex
-                : (levelCount - 1u - requestIndex / pagesPerLevel) * pagesPerLevel
-                    + requestIndex % pagesPerLevel;
-            uint4 metadata = _VSMPrototypePageMetadata[virtualPageIndex];
-            bool coarseRequest = (metadata.x & kVSMPageCoarseRequested) != 0u;
-            if ((metadata.x & kVSMPageRequested) == 0u || coarseRequest != (phase == 0u))
-                continue;
-
-            if (metadata.z != (uint)_VSMPrototypeFeedbackFrameIndex)
+            uint requests = g_VSMRequestedPages[word];
+            while (requests != 0u)
             {
-                metadata.x &= ~kVSMPageRequestMask;
-                _VSMPrototypePageMetadata[virtualPageIndex] = metadata;
-                continue;
-            }
+                uint requestIndex = word * 32u + (uint)firstbitlow(requests);
+                requests &= requests - 1u;
+                uint virtualPageIndex = (levelCount - 1u - requestIndex / pagesPerLevel) * pagesPerLevel
+                        + requestIndex % pagesPerLevel;
+                uint4 metadata = _VSMPrototypePageMetadata[virtualPageIndex];
+                if ((metadata.x & kVSMPageRequested) == 0u || VSMPageRequestPriority(metadata.x) != phase)
+                    continue;
 
-            requestedPageCount++;
-            if ((metadata.x & kVSMPageAllocated) == 0u)
-            {
-                const uint physicalPageCapacity =
-                    (uint)_VSMPrototypePhysicalPageCapacity;
-                uint physicalPageIndex = physicalPageCapacity;
-                for (uint freeSlot = 0u; freeSlot < physicalPageCapacity; freeSlot++)
+                requestedPageCount++;
+                if ((metadata.x & kVSMPageAllocated) == 0u)
                 {
-                    if (_VSMPrototypePhysicalPageOwners[freeSlot] == 0u)
+                    const uint physicalPageCapacity =
+                        (uint)_VSMPrototypePhysicalPageCapacity;
+                    uint physicalPageIndex = physicalPageCapacity;
+                    for (uint freeSlot = 0u; allocatedPageCount < physicalPageCapacity && freeSlot < physicalPageCapacity; freeSlot++)
                     {
-                        physicalPageIndex = freeSlot;
-                        break;
-                    }
-                }
-                if (physicalPageIndex == physicalPageCapacity && canEvictPages)
-                {
-                    uint oldestRequestedFrame = 0xffffffffu;
-                    for (uint candidateIndex = 0u;
-                         candidateIndex < physicalPageCapacity;
-                         candidateIndex++)
-                    {
-                        const uint owner =
-                            _VSMPrototypePhysicalPageOwners[candidateIndex] - 1u;
-                        const uint4 candidateMetadata = _VSMPrototypePageMetadata[owner];
-                        const uint lastRequestedFrame = candidateMetadata.z;
-                        // Keep resident request bits until allocation finishes. A
-                        // reset timestamp alone (including frame zero) is not demand.
-                        if ((candidateMetadata.x & kVSMPageRequested) != 0u
-                            && lastRequestedFrame == (uint)_VSMPrototypeFeedbackFrameIndex
-                            && ((candidateMetadata.x & kVSMPageCoarseRequested) != 0u
-                                || (!coarseRequest && owner / pagesPerLevel >= virtualPageIndex / pagesPerLevel)))
-                            continue;
-
-                        if (physicalPageIndex == physicalPageCapacity
-                            || lastRequestedFrame < oldestRequestedFrame)
+                        if (_VSMPrototypePhysicalPageOwners[freeSlot] == 0u)
                         {
-                            physicalPageIndex = candidateIndex;
-                            oldestRequestedFrame = lastRequestedFrame;
+                            physicalPageIndex = freeSlot;
+                            break;
                         }
                     }
-
-                    // Once all residents are protected for this priority, later misses overflow.
-                    canEvictPages = physicalPageIndex < physicalPageCapacity;
-                }
-
-                if (physicalPageIndex < physicalPageCapacity)
-                {
-                    if (_VSMPrototypePhysicalPageOwners[physicalPageIndex] != 0u)
+                    if (physicalPageIndex == physicalPageCapacity && canEvictPages)
                     {
-                        const uint evictedVirtualPage =
-                            _VSMPrototypePhysicalPageOwners[physicalPageIndex] - 1u;
-                        uint4 evictedMetadata =
-                            _VSMPrototypePageMetadata[evictedVirtualPage];
-                        // Preserve demand when a coarse request displaces requested
-                        // detail; phase 1 must still account for its miss/overflow.
-                        evictedMetadata.x &= kVSMPageRequestMask;
-                        evictedMetadata.y = 0u;
-                        evictedMetadata.w = kVSMPageDebugEvicted | (evictedMetadata.w & kVSMPageRequestMask);
-                        _VSMPrototypePageMetadata[evictedVirtualPage] = evictedMetadata;
-                        _VSMPrototypeWritablePageTable[evictedVirtualPage] = 0u;
+                        uint oldestRequestedFrame = 0xffffffffu;
+                        uint lowestPriority = 0u;
+                        for (uint candidateIndex = 0u;
+                             candidateIndex < physicalPageCapacity;
+                             candidateIndex++)
+                        {
+                            const uint owner =
+                                _VSMPrototypePhysicalPageOwners[candidateIndex] - 1u;
+                            const uint4 candidateMetadata = _VSMPrototypePageMetadata[owner];
+                            const uint lastRequestedFrame = candidateMetadata.z;
+                            // Keep resident request bits until allocation finishes. A
+                            // reset timestamp alone (including frame zero) is not demand.
+                            bool currentRequest = (candidateMetadata.x & kVSMPageRequested) != 0u
+                                && lastRequestedFrame == (uint)_VSMPrototypeFeedbackFrameIndex;
+                            uint candidatePriority = currentRequest ? VSMPageRequestPriority(candidateMetadata.x) : 4u;
+                            if (candidatePriority < phase
+                                || (candidatePriority == phase
+                                    && owner / pagesPerLevel >= virtualPageIndex / pagesPerLevel))
+                                continue;
+
+                            // Reclaim lower-value demand before using LRU within a role.
+                            if (physicalPageIndex == physicalPageCapacity
+                                || candidatePriority > lowestPriority
+                                || (candidatePriority == lowestPriority && lastRequestedFrame < oldestRequestedFrame))
+                            {
+                                physicalPageIndex = candidateIndex;
+                                lowestPriority = candidatePriority;
+                                oldestRequestedFrame = lastRequestedFrame;
+                            }
+                        }
+
+                        // Once all residents are protected for this priority, later misses overflow.
+                        canEvictPages = physicalPageIndex < physicalPageCapacity;
+                    }
+
+                    if (physicalPageIndex < physicalPageCapacity)
+                    {
+                        if (_VSMPrototypePhysicalPageOwners[physicalPageIndex] != 0u)
+                        {
+                            const uint evictedVirtualPage =
+                                _VSMPrototypePhysicalPageOwners[physicalPageIndex] - 1u;
+                            uint4 evictedMetadata =
+                                _VSMPrototypePageMetadata[evictedVirtualPage];
+                            // Preserve lower-priority demand so its later phase still
+                            // accounts for the miss/overflow after displacement.
+                            evictedMetadata.x &= kVSMPageRequestMask;
+                            evictedMetadata.y = 0u;
+                            evictedMetadata.w = kVSMPageDebugEvicted | (evictedMetadata.w & kVSMPageRequestMask);
+                            _VSMPrototypePageMetadata[evictedVirtualPage] = evictedMetadata;
+                            _VSMPrototypeWritablePageTable[evictedVirtualPage] = 0u;
+                        }
+                        else
+                        {
+                            // New allocation into a free slot, possibly a scroll hole.
+                            allocatedPageCount++;
+                        }
+
+                        uint encodedPhysicalPage = physicalPageIndex + 1u;
+                        metadata.x = (metadata.x | kVSMPageAllocated
+                            | kVSMPageDirty
+                            | kVSMPageStatic
+                            | kVSMPageDynamic) & ~kVSMPageCached;
+                        metadata.y = encodedPhysicalPage;
+                        metadata.w = metadata.x;
+                        _VSMPrototypeWritablePageTable[virtualPageIndex] =
+                            encodedPhysicalPage;
+                        _VSMPrototypePhysicalPageOwners[physicalPageIndex] =
+                            virtualPageIndex + 1u;
+                        newlyAllocatedPageCount++;
                     }
                     else
                     {
-                        // New allocation into a free slot, possibly a scroll hole.
-                        allocatedPageCount++;
+                        overflowPageCount++;
+                        metadata.w |= kVSMPageDebugOverflow;
                     }
+                }
 
-                    uint encodedPhysicalPage = physicalPageIndex + 1u;
-                    metadata.x = (metadata.x | kVSMPageAllocated
-                        | kVSMPageDirty
-                        | kVSMPageStatic
-                        | kVSMPageDynamic) & ~kVSMPageCached;
-                    metadata.y = encodedPhysicalPage;
-                    metadata.w = metadata.x;
-                    _VSMPrototypeWritablePageTable[virtualPageIndex] =
-                        encodedPhysicalPage;
-                    _VSMPrototypePhysicalPageOwners[physicalPageIndex] =
-                        virtualPageIndex + 1u;
-                    newlyAllocatedPageCount++;
-                }
-                else
-                {
-                    overflowPageCount++;
-                    metadata.w |= kVSMPageDebugOverflow;
-                }
+                if ((metadata.x & kVSMPageAllocated) == 0u)
+                    metadata.x &= ~kVSMPageRequestMask;
+                _VSMPrototypePageMetadata[virtualPageIndex] = metadata;
             }
-
-            if ((metadata.x & kVSMPageAllocated) == 0u)
-                metadata.x &= ~kVSMPageRequestMask;
-            _VSMPrototypePageMetadata[virtualPageIndex] = metadata;
         }
     }
 
@@ -1044,7 +1078,7 @@ int2 ShadowUVToTexelCoord(float2 shadowUV, int cascadeIndex)
     return int2(saturate(shadowUV) * (GetShadowMapResolution(cascadeIndex) - 1));
 }
 
-void MarkVSMReceiverPage(float2 shadowUV, int cascadeIndex)
+void MarkVSMReceiverPage(float2 shadowUV, int cascadeIndex, uint requestRole)
 {
 #if defined(VIVID_VSM_RECEIVER_DEBUG)
     // Replaying the resolver for inspection must not alter live receiver feedback.
@@ -1064,7 +1098,7 @@ void MarkVSMReceiverPage(float2 shadowUV, int cascadeIndex)
     // storage. Emit once per distinct page, at most four even at a page corner.
     uint2 minPage = (uint2)max(virtualTexel - 1, 0) / pageSize;
     uint2 maxPage = (uint2)min(virtualTexel + 1, (int)resolution - 1) / pageSize;
-    uint request = kVSMPageRequested;
+    uint request = kVSMPageRequested | requestRole;
     if (cascadeIndex == _VSMProjectionCount - 1)
         request |= kVSMPageCoarseRequested;
     for (uint y = minPage.y; y <= maxPage.y; y++)
@@ -1077,6 +1111,11 @@ void MarkVSMReceiverPage(float2 shadowUV, int cascadeIndex)
         }
     }
 #endif
+}
+
+void MarkVSMReceiverPage(float2 shadowUV, int cascadeIndex)
+{
+    MarkVSMReceiverPage(shadowUV, cascadeIndex, 0u);
 }
 
 bool TryResolveVSMPhysicalTexel(int2 virtualTexel, int cascadeIndex, out int2 physicalTexel)
@@ -2118,8 +2157,9 @@ float VSMTransitionWeight(float edge, float border)
 // at every fallback level. Reusing a fine UV/depth or shifting a physical texel
 // would sample unrelated data after clipmap scrolling.
 bool TryEvaluateVSMProjection(float3 positionWS, float3 normalWS, int index,
-    bool sampleDepth, uint2 pixel, out float shadow)
+    bool sampleDepth, uint2 pixel, uint requestRole, out bool covered, out float shadow)
 {
+    covered = false;
     shadow = 1.0;
 #if defined(VIVID_VSM_RECEIVER_DEBUG)
     if (!sampleDepth) return false;
@@ -2137,7 +2177,8 @@ bool TryEvaluateVSMProjection(float3 positionWS, float3 normalWS, int index,
 #endif
         return false;
     }
-    MarkVSMReceiverPage(coord.xy, index);
+    covered = true;
+    MarkVSMReceiverPage(coord.xy, index, requestRole);
     if (!sampleDepth || _VSMPrototypeEnabled == 0)
         return false;
     return TryFilterVSMProjection(coord, bias, index, pixel, shadow);
@@ -2146,7 +2187,8 @@ bool TryEvaluateVSMProjection(float3 positionWS, float3 normalWS, int index,
 bool TryEvaluateVSMProjection(float3 positionWS, float3 normalWS, int index,
     bool sampleDepth, out float shadow)
 {
-    return TryEvaluateVSMProjection(positionWS, normalWS, index, sampleDepth, uint2(0, 0), shadow);
+    bool covered;
+    return TryEvaluateVSMProjection(positionWS, normalWS, index, sampleDepth, uint2(0, 0), 0u, covered, shadow);
 }
 
 #include "VSMReceiverQuality.hlsl"
@@ -2182,14 +2224,21 @@ float ResolveVSMReceiver(float3 positionWS, float3 normalWS, uint2 pixel)
         float transition = 1.0;
         int sampledLevel = -1;
         bool hasTransition = false;
+        uint requestRole = kVSMPagePrimaryRequested;
         for (int level = index; level < _VSMProjectionCount; level++)
         {
-            // Request the whole fallback chain even when fine depth is available.
-            // The last level is prioritized by the allocator to back future misses.
+            // Roles follow geometric coverage and the intended blend, never page
+            // residency. Missing primary depth must not promote its entire fallback
+            // chain (or suppress next-frame transition demand during bootstrap).
             bool needSample = sampledLevel < 0 || (sampledLevel == index && blend > 0.0 && !hasTransition);
             float sampleShadow;
-            if (!TryEvaluateVSMProjection(positionWS, normalWS, level, needSample, pixel, sampleShadow))
-                continue;
+            bool covered;
+            bool sampled = TryEvaluateVSMProjection(positionWS, normalWS, level, needSample, pixel,
+                requestRole, covered, sampleShadow);
+            if (covered)
+                requestRole = requestRole == kVSMPagePrimaryRequested
+                    ? kVSMPageParentRequested | (blend > 0.0 ? kVSMPageTransitionRequested : 0u) : 0u;
+            if (!sampled) continue;
             if (sampledLevel < 0)
             {
                 sampledLevel = level;

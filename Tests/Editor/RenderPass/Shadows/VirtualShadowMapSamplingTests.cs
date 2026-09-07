@@ -802,9 +802,9 @@ namespace VividRP.Editor.Tests
             Assert.That(f.Run("ResolveReceivers", new[] { receiver })[0].x, Is.Zero);
         }
 
-        [TestCase(3.5f, 0.16f)]
-        [TestCase(3.25f, 0.09876543f)]
-        public void PCF_NormalizesTentWeightsAcrossShuffledPages(float center, float expected)
+        [TestCase(3.5f, 0.1875f)]
+        [TestCase(3.25f, 0.109375f)]
+        public void PCF_NormalizesAreaWeightsAcrossShuffledPages(float center, float expected)
         {
             using var f = new Fixture();
             f.Shader.SetVector("_VSMReceiverParameters", new Vector4(1, 0, 0, 0));
@@ -815,6 +815,114 @@ namespace VividRP.Editor.Tests
             float2 value = f.Run("FilterFootprints", new[] { new float4(center / 8, center / 8, 0.5f, 0) })[0];
             Assert.That(value.x, Is.EqualTo(1));
             Assert.That(value.y, Is.EqualTo(expected).Within(0.00001));
+        }
+
+        private static float4[] AreaPhaseInputs(bool insidePageCorner = false)
+        {
+            var inputs = new float4[17 * 17];
+            for (int y = 0; y < 17; y++) for (int x = 0; x < 17; x++)
+            {
+                float2 texel = insidePageCorner ? 3.125f + new float2(x, y) * (0.75f / 16)
+                    : 3 + new float2(x, y) * (1f / 16);
+                inputs[y * 17 + x] = new float4(texel / 8, 0.5f, 0);
+            }
+            return inputs;
+        }
+
+        private static void SetAreaTestDepth(Fixture fixture, int x, int y, float depth)
+        {
+            int slot = (int)fixture.TableData[y / 4 * 2 + x / 4] - 1;
+            int pixel = (slot / 4 * 4 + y % 4) * 16 + slot % 4 * 4 + x % 4;
+            fixture.StaticData[pixel] = math.asuint(depth);
+        }
+
+        [TestCase(0)]
+        [TestCase(1)]
+        [TestCase(2)]
+        [TestCase(3)]
+        [TestCase(4)]
+        public void PCF_AreaWeightsPreserveConstantsAndRejectNyquistAcrossSubTexelPhases(int pattern)
+        {
+            using var f = new Fixture();
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(1, 0, 0, 0));
+            int[] slots = { 9, 2, 14, 6 };
+            for (int page = 0; page < 4; page++) f.Map(page, slots[page]);
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+            {
+                bool lit = pattern == 1 || (pattern >= 2 && ((pattern == 2 ? x : pattern == 3 ? y : x + y) & 1) != 0);
+                SetAreaTestDepth(f, x, y, lit ? 0.2f : 0.8f);
+            }
+            f.Upload();
+            // A two-texel-wide box integrates one full period of an alternating
+            // signal at every phase. This reference does not reproduce tap weights.
+            float expected = pattern < 2 ? pattern : 0.5f;
+            foreach (float2 value in f.Run("FilterFootprints", AreaPhaseInputs()))
+            {
+                Assert.That(value.x, Is.EqualTo(1));
+                Assert.That(value.y, Is.EqualTo(expected).Within(1e-6f));
+            }
+        }
+
+        [Test]
+        public void HardSampling_RemainsPointSampledWhenStochasticOptionIsSelected()
+        {
+            using var f = new Fixture();
+            int[] slots = { 9, 2, 14, 6 };
+            for (int page = 0; page < 4; page++) f.Map(page, slots[page]);
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+                SetAreaTestDepth(f, x, y, (x & 1) != 0 ? 0.2f : 0.8f);
+            f.Upload();
+            float4[] inputs = AreaPhaseInputs();
+            f.Shader.SetVector("_VSMReceiverParameters", Vector4.zero);
+            float2[] hard = f.Run("FilterFootprints", inputs);
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(0, 0, 0, 1));
+            Assert.That(f.Run("FilterFootprints", inputs), Is.EqualTo(hard));
+            for (int i = 0; i < inputs.Length; i++)
+                Assert.That(hard[i], Is.EqualTo(new float2(1, ((int)math.floor(inputs[i].x * 8) & 1) != 0 ? 1 : 0)));
+        }
+
+        [TestCase(0, false)]
+        [TestCase(1, false)]
+        [TestCase(2, false)]
+        [TestCase(0, true)]
+        [TestCase(1, true)]
+        [TestCase(2, true)]
+        public void Sampling_AcrossSubTexelPhasesSeparatesCoplanarReceiversAndBlockers(int mode, bool blocker)
+        {
+            using var f = new Fixture();
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(mode == 0 ? 0 : 1, 0, 0, mode == 2 ? 1 : 0));
+            int[] slots = { 9, 2, 14, 6 };
+            for (int page = 0; page < 4; page++) f.Map(page, slots[page]);
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+                SetAreaTestDepth(f, x, y, 0.5f + 0.05f * (x - 2.75f) + 0.03f * (y - 2.75f) + (blocker ? 0.04f : 0));
+            f.Upload();
+            float4[] inputs = AreaPhaseInputs();
+            var corrections = new float4[inputs.Length];
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                float2 texel = inputs[i].xy * 8;
+                inputs[i].z = 0.5f + 0.05f * (texel.x - 3.25f) + 0.03f * (texel.y - 3.25f);
+                corrections[i] = new float4(0.05f, 0.03f, 1e-5f, 0);
+            }
+            foreach (float2 value in f.Run("FilterFootprints", inputs, normals: corrections))
+                Assert.That(value, Is.EqualTo(new float2(1, blocker ? 0 : 1)));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void PCF_AreaFilteringDoesNotRenormalizeAroundMissingPagesAcrossPhases(bool dirty)
+        {
+            using var f = new Fixture();
+            f.Shader.SetVector("_VSMReceiverParameters", new Vector4(1, 0, 0, 0));
+            int[] slots = { 9, 2, 14, 6 };
+            for (int page = 0; page < 3; page++) f.Map(page, slots[page], 0.8f);
+            if (dirty) { f.Map(3, slots[3], 0.8f); f.MetadataData[3].x |= 4; }
+            for (int page = 4; page < 8; page++) f.Map(page, page - 4);
+            f.Upload();
+            float4[] inputs = AreaPhaseInputs(true);
+            foreach (float2 value in f.Run("FilterFootprints", inputs)) Assert.That(value.x, Is.Zero);
+            for (int i = 0; i < inputs.Length; i++) inputs[i] = new float4((inputs[i].xy * 8 - 4) / 0.8f, 0, 0);
+            foreach (float2 value in f.Run("ResolveReceivers", inputs)) Assert.That(value.x, Is.EqualTo(1));
         }
 
         [Test]

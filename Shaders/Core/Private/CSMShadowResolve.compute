@@ -1964,9 +1964,11 @@ float4 BuildVSMReceiverBias(VividVSMProjection projection, float3 normalWS)
     return float4(gradient, comparisonBias, normalOffset);
 }
 
-float VSMTentWeight(float offsetFromCenter)
+float VSMAreaWeight(float offsetFromCenter)
 {
-    return max(1.5 - abs(offsetFromCenter), 0.0);
+    // Overlap of a unit texel cell with a receiver-centered, two-texel-wide box.
+    // The three axis weights sum to two at every sub-texel phase.
+    return saturate(1.5 - abs(offsetFromCenter));
 }
 
 uint VSMStochasticHash(uint value)
@@ -2081,7 +2083,7 @@ bool TryFilterVSMProjection(float3 coord, float4 bias, int index, uint2 pixel, o
         for (int x = -1; x <= 1; x++)
         {
             float2 tapOffset = float2(x, y) - centerOffset;
-            float weight = VSMTentWeight(tapOffset.x) * VSMTentWeight(tapOffset.y);
+            float weight = VSMAreaWeight(tapOffset.x) * VSMAreaWeight(tapOffset.y);
             if (weight <= 0.0)
                 continue;
             // Compare at the tap's receiver-plane depth, not at the center's
